@@ -90,6 +90,53 @@ func (s *Server) refreshQuota(ctx context.Context, acc *Account) error {
 		}
 	}
 	balances, balanceErr := s.tryBalance(ctx, acc, currentPlan)
+
+	// billing/current 现在对所有账号返回 plans: []（2026-10 上游行为变化），
+	// 真实额度只在 billing/balance 里。没有 active plan 时按 balance 合成计划，
+	// 复用下面的聚合逻辑，避免面板额度恒为 0。
+	if len(activePlans) == 0 && balanceErr == nil && len(balances) > 0 {
+		groups := map[string]*PlanInfo{}
+		var order []string
+		for _, b := range balances {
+			key := b.PlanID + "|" + b.UserPlanID
+			p, ok := groups[key]
+			if !ok {
+				p = &PlanInfo{
+					UserPlanID: b.UserPlanID,
+					PlanID:     b.PlanID,
+					Name:       b.PlanID,
+					Status:     "active",
+				}
+				groups[key] = p
+				order = append(order, key)
+			}
+			p.Entitlements = append(p.Entitlements, PlanEntitlement{
+				EntitlementID: b.EntitlementID,
+				ShowName:      b.ShowName,
+				GrantUnits:    b.TotalUnits,
+				Period:        "one_time",
+			})
+		}
+		var best *PlanInfo
+		bestTotal := int64(-1)
+		for _, key := range order {
+			p := groups[key]
+			var total int64
+			for _, e := range p.Entitlements {
+				total += e.GrantUnits
+			}
+			activePlans = append(activePlans, p)
+			if total > bestTotal {
+				best, bestTotal = p, total
+			}
+		}
+		if best != nil {
+			currentPlan = best
+			quota.PlanName = best.Name
+			quota.PlanID = best.PlanID
+			quota.Status = "active"
+		}
+	}
 	byEntitlement := map[string]Balance{}
 	byPlanName := map[string]Balance{}
 	for _, b := range balances {
