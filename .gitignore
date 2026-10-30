@@ -36,3 +36,11 @@ Thumbs.db
 
 # Backup files
 *~
+
+# Sidecar solver (third-party, not redistributed)
+contrib/claimer/solver/node_modules/
+contrib/claimer/solver/*.js
+contrib/claimer/solver/*.html
+__pycache__/
+*.pyc
+

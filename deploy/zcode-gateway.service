@@ -1,0 +1,26 @@
+[Unit]
+Description=zcode-gateway - ZCode 多账号 Anthropic 兼容网关
+Documentation=https://github.com/Ciii-ATM/zcode-gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/zcode-gateway
+# 端口沿用旧网关的 127.0.0.1:3000，外层反代/隧道无需改动
+Environment=ZCODE_GATEWAY_ADDR=127.0.0.1:3000
+Environment=ZCODE_GATEWAY_DATA=/opt/zcode-gateway/data
+Environment=ZCODE_ADMIN_PASSWORD=CHANGE_ME
+Environment=ZCODE_GATEWAY_LOG=1
+ExecStart=/opt/zcode-gateway/zcode-gateway
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+SyslogIdentifier=zcode-gateway
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

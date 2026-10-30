@@ -1,0 +1,16 @@
+[Unit]
+Description=ZCode plan auto-claim round (sidecar for zcode-gateway)
+After=network-online.target zcode-gateway.service
+Wants=network-online.target zcode-gateway.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/zcode-claimer.env
+ExecStart=/usr/bin/python3 /opt/zcode-claimer/claim_round.py
+Nice=10
+IOSchedulingClass=idle
+# 一轮最多解 ZC_MAX_SOLVES 次验证码，每次 ~7s，留足余量
+TimeoutStartSec=1800
+# 求解时 Chromium 峰值约 590MB，给个硬上限：宁可这一轮被杀，也不要拖垮网关
+MemoryMax=700M
+MemorySwapMax=1G

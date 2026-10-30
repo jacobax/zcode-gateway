@@ -1,0 +1,12 @@
+[Unit]
+Description=zcode-gateway auto update (GitHub Releases: Ciii-ATM/zcode-gateway)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/zcode-gateway-autoupdate.sh
+Nice=10
+IOSchedulingClass=idle
+# 下载 + 校验 + 重启 + 健康检查可能几分钟
+TimeoutStartSec=900

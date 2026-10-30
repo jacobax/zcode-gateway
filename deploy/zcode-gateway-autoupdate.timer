@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily check for zcode-gateway updates
+
+[Timer]
+# 每天 05:50 北京时间：错开 watchtower（05:00）与 workbuddy2api 自动更新（05:45）
+OnCalendar=*-*-* 05:50:00 Asia/Shanghai
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

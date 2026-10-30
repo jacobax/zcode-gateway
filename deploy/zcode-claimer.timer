@@ -1,0 +1,11 @@
+[Unit]
+Description=Hourly ZCode plan auto-claim round
+
+[Timer]
+# 每小时 :17 跑一轮（错开整点；套餐投放是抢名额制，想更快就把 17 改成 */10）
+OnCalendar=*-*-* *:17:00
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target
