@@ -74,7 +74,8 @@ pe 虚拟机上会 stall（实测 `[pe-stall] pe.075.…`，退出码 2）。真
 | `ZC_MIN_AVAIL_MB` | `450` | 可用内存低于此值跳过本轮 |
 | `ZC_MAX_SOLVES` | `8` | 单轮最多解几次验证码 |
 | `ZC_REQUIRE_CLAIMABLE` | `0` | `1` = 只领 preview 标 `claimable=true` 的项 |
-| `ZC_RETRY_SKIP_HOURS` | `6` | 失败缓存有效期 |
+| `ZC_RETRY_SKIP_HOURS` | `6` | 失败缓存有效期（1001–1005 与 3012 都缓存） |
+| `ZC_CLAIM_GAP_SEC` | `15` | 两次领取之间的间隔秒数；同一个出口 IP 连续领很容易吃 3012 |
 | `ZC_AUTO_MANAGE` | `1` | 按额度自动启停（旧名 `ZC_AUTO_ENABLE` 仍可用） |
 | `ZC_EMPTY_ROUNDS` | `2` | 连续几轮查不到额度才禁用 |
 
@@ -87,3 +88,7 @@ pe 虚拟机上会 stall（实测 `[pe-stall] pe.075.…`，退出码 2）。真
 - **领取必须带 `X-Aliyun-Captcha-Verify-Region`**，漏掉会返回 `3007`。
 - 直连上游 `billing/claim` 会因缺 `X-ZCode-*` 头返回 `3001 parameter error`，
   所以一律走网关的管理接口，别自己拼请求。
+- **`3012` 是风控，不是业务错误**。同一个出口 IP 连续领取多个账号会开始回
+  `账号或者网络环境存在异常`。脚本侧已经做了限速（`ZC_CLAIM_GAP_SEC`）、熔断
+  （连续 3 次结束本轮）和缓存（6 小时内不重试），但这只是缓解——根治要换出口 IP，
+  见 `OPERATIONS.md` 的「出口 IP 与风控」一节。

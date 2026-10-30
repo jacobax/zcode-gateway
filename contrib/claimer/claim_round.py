@@ -26,7 +26,8 @@
   ZC_MIN_AVAIL_MB       低于该可用内存就跳过本轮，默认 450
   ZC_MAX_SOLVES         单轮最多解几次验证码，默认 8
   ZC_REQUIRE_CLAIMABLE  1 = 只领 preview 标记可领的（默认 0）
-  ZC_RETRY_SKIP_HOURS   失败缓存有效期，默认 6
+  ZC_RETRY_SKIP_HOURS   失败缓存有效期，默认 6（1001–1005 与 3012 都缓存）
+  ZC_CLAIM_GAP_SEC      两次领取之间的间隔秒数，默认 15（防 3012 风控）
   ZC_AUTO_MANAGE        1 = 按额度自动启停（默认 1，旧名 ZC_AUTO_ENABLE 仍可用）
   ZC_EMPTY_ROUNDS       连续几轮无额度才禁用，默认 2
   ZC_DISABLED_MARKER    额外认这个 lastError 标记的禁用号（默认「迁移时停用」）
@@ -47,6 +48,7 @@ MIN_AVAIL_MB = int(os.environ.get("ZC_MIN_AVAIL_MB", "450"))
 MAX_SOLVES = int(os.environ.get("ZC_MAX_SOLVES", "8"))
 SOLVER_TIMEOUT = int(os.environ.get("ZC_SOLVER_TIMEOUT", "120"))
 REQUIRE_CLAIMABLE = os.environ.get("ZC_REQUIRE_CLAIMABLE", "0") == "1"
+CLAIM_GAP_SEC = float(os.environ.get("ZC_CLAIM_GAP_SEC", "15"))
 AUTO_MANAGE = os.environ.get("ZC_AUTO_MANAGE", os.environ.get("ZC_AUTO_ENABLE", "1")) == "1"
 EMPTY_ROUNDS = max(1, int(os.environ.get("ZC_EMPTY_ROUNDS", "2")))
 DISABLED_MARKER = os.environ.get("ZC_DISABLED_MARKER", "迁移时停用")
@@ -55,7 +57,7 @@ DRY = "--dry-run" in sys.argv
 LOG = os.environ.get("ZC_LOG", "/var/log/zcode-claimer.log")
 STATE_DIR = os.environ.get("ZC_STATE_DIR", "/var/lib/zcode-claimer")
 STATE_FILE = os.path.join(STATE_DIR, "attempts.json")
-SKIP_CODES = {1001, 1002, 1003, 1004, 1005}
+SKIP_CODES = {1001, 1002, 1003, 1004, 1005, 3012}
 
 
 def say(msg):
@@ -304,11 +306,14 @@ def main():
         say(f"  可用内存 {mem}MB < {MIN_AVAIL_MB}MB，本轮跳过（避免把机器压垮）")
         return 0
 
-    claimed = failed = 0
+    claimed = failed = streak_3012 = 0
     for i, (aid, label, plan_id, name, scene, region, prefix) in enumerate(todo):
         if i >= MAX_SOLVES:
             say(f"  已达单轮上限 {MAX_SOLVES} 次求解，剩余留到下一轮")
             break
+        if i:
+            # 同一个出口 IP 连续领取很容易触发上游风控（3012），拉开节奏
+            time.sleep(CLAIM_GAP_SEC)
         say(f"  领取 {label} / {name} ({plan_id})")
         param = ""
         if scene and region and prefix:
@@ -327,15 +332,20 @@ def main():
         code = res.get("code")
         if st == 200 and res.get("ok"):
             claimed += 1
+            streak_3012 = 0
             attempts.pop(f"{aid}|{plan_id}", None)
             say(f"    ✅ 领取成功 {name}")
         else:
             failed += 1
             attempts[f"{aid}|{plan_id}"] = {"code": code, "ts": now, "msg": str(res.get("message"))[:80]}
             say(f"    ❌ 领取失败 HTTP {st} code={code} msg={res.get('message')!r}")
+            streak_3012 = streak_3012 + 1 if code == 3012 else 0
         save_attempts(attempts)
-        time.sleep(2)
+        if streak_3012 >= 3:
+            say("  连续 3 次 3012 风控，本轮提前结束（这些项 6 小时内不再重试）")
+            break
 
+    say(f"  本轮结束：成功 {claimed}，失败 {failed}，缓存跳过 {skipped}")
     say(f"  本轮结束：成功 {claimed}，失败 {failed}，缓存跳过 {skipped}")
     return 0
 

@@ -93,6 +93,44 @@ git fetch origin main → 比对 VERSION 里的 commit → 备份 data/旧二进
    `contrib/claimer` 的自动启停就是补这个洞：`granted==0` 连续两轮就禁用，
    等额度回来再自动启用。
 
+## 出口 IP 与风控
+
+上游的 `3012 账号或者网络环境存在异常` 是按**出口 IP** 判的：同一台机器、同一个 IP
+连续领取多个账号，领到第 6～8 个就开始被拒。脚本侧的限速/熔断/缓存只能缓解，
+要根治得让每个账号（或每轮）从不同 IP 出去。
+
+网关本身只支持一个全局上游代理（`ZCODE_PROXY_URL` / `ZCODE_PROXY`，支持
+`http`/`https`/`socks5`/`socks5h`），见 `upstream.go`。所以思路是给它挂一个
+**能按用户名切换出口地址的代理池**：
+
+```
+[he-ipv6-pool](https://github.com/x6nux/he-ipv6-pool)
+  一条免费 HE IPv6 隧道 → SOCKS5/HTTP 代理池，出口地址由代理用户名后缀决定
+  例：alice-ttl-15m-cidr-64 → 每 15 分钟换一个地址，且每次换到不同的 /64
+```
+
+接法（在网关的 systemd 单元里加一行）：
+
+```ini
+Environment=ZCODE_PROXY_URL=socks5h://alice-ttl-15m-cidr-64:<密码>@127.0.0.1:24601
+```
+
+前置条件与代价：
+
+- 需要一个 HE 隧道（`tunnelbroker.net` 免费注册），VPS 的公网 IPv4 要能被 HE ping 通，
+  AWS 安全组要放行**协议 41**（入站）和代理端口（回环可不开）
+- **所有上游流量都会走这个代理**——不只是领取，还有模型请求和额度刷新。好处是 IP 轮换，
+  代价是多一跳 HE 隧道（亚洲机建议选美西节点，RTT 增加约 150～250ms）以及免费隧道的抖动
+- 代理挂了网关就完全打不到上游。排查时先把它摘掉：
+  `systemctl edit zcode-gateway` 里置空 `ZCODE_PROXY_URL` 再 `restart`
+
+验证出口确实在变：
+
+```bash
+curl -s -x socks5h://alice-ttl-1m-cidr-64:<密码>@127.0.0.1:24601 https://ipv6.icanhazip.com
+# 隔一分钟再跑一次，应该拿到不同的地址（且不在同一个 /64）
+```
+
 ## 回滚
 
 ```bash
