@@ -31,18 +31,21 @@ func (s *Server) refreshAllQuotas(ctx context.Context) {
 	accounts := s.store.AccountsForRefresh()
 	sem := make(chan struct{}, 2)
 	done := make(chan struct{}, len(accounts))
+	spawned := 0
 	for _, acc := range accounts {
 		if !acc.Enabled {
 			continue
 		}
 		acc := acc
 		sem <- struct{}{}
+		spawned++
 		go func() {
 			defer func() { <-sem; done <- struct{}{} }()
 			_ = s.refreshQuota(ctx, acc)
 		}()
 	}
-	for range accounts {
+	// 只等真正启动的 goroutine：禁用账号不会发 done，按 len(accounts) 等会永久卡死
+	for i := 0; i < spawned; i++ {
 		select {
 		case <-done:
 		case <-ctx.Done():
