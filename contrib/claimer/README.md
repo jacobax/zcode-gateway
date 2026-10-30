@@ -12,9 +12,27 @@
 2. 逐个问 `/api/accounts/{id}/activities`，取可领套餐列表与验证码配置。
 3. 对「列表里出现且未标记已领」的项：调本机 Chromium 跑官方 SDK 解出验证码 →
    `POST /api/accounts/{id}/claim`。
-4. 禁用账号一旦 `quota.remaining > 0`（套餐生效、额度到账）就自动启用回转发池。
+4. 按额度自动启停（见下节）。
 5. 同一 (账号, 套餐) 命中 `1001–1005` 后 6 小时内不再重试，避免反复解验证码。
 
+## 额度启停策略
+
+网关的选号只看 `enabled` 和冷却，**不看额度**；而上游对「没有套餐」的账号返回的是
+HTTP 200 + `{"code":1005,"exceed quota limit"}`，网关不识别这个业务码，会原样透传给
+客户端。所以没额度的账号必须从转发池里拿掉。
+
+脚本按下面的规则维护这件事（`ZC_AUTO_MANAGE=1` 时生效）：
+
+| 条件 | 动作 |
+|---|---|
+| 禁用中 + `remaining > 0` + 是脚本禁用的（或 lastError 带迁移标记） | 启用 |
+| 启用中 + 额度数据新鲜（`source=api`，15 分钟内）+ `granted==0` 连续 2 轮 | 禁用 |
+| 启用中 + `granted>0` 但 `remaining==0`（用光了） | **不动**，交给网关的 `ExhaustedUntil` |
+| 人工禁用的账号（不在脚本的管辖名单里） | **不动** |
+
+管辖名单存在 `/var/lib/zcode-claimer/quota_state.json` 的 `disabled_by_us` 里：
+脚本自己禁用的会自动登记，人工禁用的不会。这样"我不想要这个号"和"这个号暂时没额度"
+两种意图不会互相覆盖。
 ## 依赖
 
 脚本本体只用 Python 标准库，但**验证码求解需要外部求解器**：
@@ -57,7 +75,8 @@ pe 虚拟机上会 stall（实测 `[pe-stall] pe.075.…`，退出码 2）。真
 | `ZC_MAX_SOLVES` | `8` | 单轮最多解几次验证码 |
 | `ZC_REQUIRE_CLAIMABLE` | `0` | `1` = 只领 preview 标 `claimable=true` 的项 |
 | `ZC_RETRY_SKIP_HOURS` | `6` | 失败缓存有效期 |
-| `ZC_AUTO_ENABLE` | `1` | 有额度就自动启用禁用账号 |
+| `ZC_AUTO_MANAGE` | `1` | 按额度自动启停（旧名 `ZC_AUTO_ENABLE` 仍可用） |
+| `ZC_EMPTY_ROUNDS` | `2` | 连续几轮查不到额度才禁用 |
 
 ## 已知的上游坑
 

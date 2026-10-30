@@ -86,6 +86,12 @@ git fetch origin main → 比对 VERSION 里的 commit → 备份 data/旧二进
 
 7. **`billing/claim` 必须带 `X-Aliyun-Captcha-Verify-Region`**，漏掉返回 `3007`；
    直连上游还要补齐 `X-ZCode-*` 头，否则 `3001 parameter error` —— 所以领取统一走网关接口。
+8. **`granted == 0` 的号不会显示"额度耗尽"**。`summary()` 的判定是
+   `Granted > 0 && Remaining <= 0`，所以"压根没有套餐"的账号状态仍是「可用」，
+   照样会被选号选中然后返回 1005。概览卡片的"可用"用的是另一个口径
+   （`enabled && Remaining > 0`），两者会差出这些号——看到数字对不上先查这里。
+   `contrib/claimer` 的自动启停就是补这个洞：`granted==0` 连续两轮就禁用，
+   等额度回来再自动启用。
 
 ## 回滚
 

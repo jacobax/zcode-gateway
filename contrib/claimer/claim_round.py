@@ -2,8 +2,12 @@
 """ZCode 套餐自动领取 sidecar —— 配合 Ciii-ATM/zcode-gateway 使用。
 
 做三件事：
-  1. 回收：禁用账号一旦有生效额度（quota.remaining > 0），自动启用回转发池；
-     只处理 lastError 带「迁移时停用」标记的号，手动禁用的账号不碰。
+  1. 按额度自动启停：有额度（remaining>0）就启用回池；连续 N 轮查不到任何额度
+     （granted==0）就禁用，避免它被选号选中后给客户端返回 1005。
+     只动「脚本自己禁用的」和 lastError 带「迁移时停用」标记的号，人工禁用的一律不碰。
+  2. 领取：逐个账号（含禁用账号——禁用的只是转发，领卡接口照样能用）问网关有哪些套餐，
+     对还没领到的逐条提交领取；验证码用本机 Chromium 跑官方 SDK。
+  3. 记忆：同一 (账号, 套餐) 命中 1001–1005 后 6 小时内不再重试，避免每小时重复解验证码。
   2. 领取：逐个账号（含禁用账号——禁用的只是转发，领卡接口照样能用）问网关有哪些套餐，
      对还没领到的逐条提交领取；验证码用本机 Chromium 跑官方 SDK。
   3. 记忆：同一 (账号, 套餐) 命中 1001–1005 后 6 小时内不再重试，避免每小时重复解验证码。
@@ -23,8 +27,9 @@
   ZC_MAX_SOLVES         单轮最多解几次验证码，默认 8
   ZC_REQUIRE_CLAIMABLE  1 = 只领 preview 标记可领的（默认 0）
   ZC_RETRY_SKIP_HOURS   失败缓存有效期，默认 6
-  ZC_AUTO_ENABLE        0 = 关闭「有额度就自动启用」，默认 1
-  ZC_DISABLED_MARKER    只对 lastError 含此标记的禁用号做自动启用
+  ZC_AUTO_MANAGE        1 = 按额度自动启停（默认 1，旧名 ZC_AUTO_ENABLE 仍可用）
+  ZC_EMPTY_ROUNDS       连续几轮无额度才禁用，默认 2
+  ZC_DISABLED_MARKER    额外认这个 lastError 标记的禁用号（默认「迁移时停用」）
 """
 import json
 import os
@@ -42,8 +47,8 @@ MIN_AVAIL_MB = int(os.environ.get("ZC_MIN_AVAIL_MB", "450"))
 MAX_SOLVES = int(os.environ.get("ZC_MAX_SOLVES", "8"))
 SOLVER_TIMEOUT = int(os.environ.get("ZC_SOLVER_TIMEOUT", "120"))
 REQUIRE_CLAIMABLE = os.environ.get("ZC_REQUIRE_CLAIMABLE", "0") == "1"
-RETRY_SKIP_HOURS = float(os.environ.get("ZC_RETRY_SKIP_HOURS", "6"))
-AUTO_ENABLE = os.environ.get("ZC_AUTO_ENABLE", "1") == "1"
+AUTO_MANAGE = os.environ.get("ZC_AUTO_MANAGE", os.environ.get("ZC_AUTO_ENABLE", "1")) == "1"
+EMPTY_ROUNDS = max(1, int(os.environ.get("ZC_EMPTY_ROUNDS", "2")))
 DISABLED_MARKER = os.environ.get("ZC_DISABLED_MARKER", "迁移时停用")
 DRY = "--dry-run" in sys.argv
 
@@ -141,33 +146,102 @@ def solve_captcha(scene, region, prefix):
     return None
 
 
-def reclaim_pass(accounts):
-    """禁用账号一旦有生效额度就启用回池。返回 (启用数, 跳过数)。"""
-    if not AUTO_ENABLE:
+QUOTA_STATE_FILE = os.path.join(STATE_DIR, "quota_state.json")
+
+
+def load_quota_state():
+    try:
+        st = json.load(open(QUOTA_STATE_FILE))
+    except Exception:
+        st = {}
+    st.setdefault("disabled_by_us", [])
+    st.setdefault("empty_streak", {})
+    return st
+
+
+def save_quota_state(st):
+    try:
+        os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+        tmp = QUOTA_STATE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(st, f, indent=2)
+        os.replace(tmp, QUOTA_STATE_FILE)
+    except Exception as e:
+        say(f"    WARN: 额度状态写入失败 {e}")
+
+
+def manage_pass(accounts):
+    """按额度自动启停，返回 (启用数, 禁用数)。
+
+    启用：禁用中 + remaining>0 + （脚本自己禁用的 或 lastError 带迁移标记）。
+    禁用：启用中 + 额度数据新鲜 + granted==0 + 连续 EMPTY_ROUNDS 轮。
+          只处理 granted==0（压根没套餐）——granted>0 但 remaining==0 是"用光了"，
+          网关自己会用 ExhaustedUntil 处理，脚本不插手，否则会和它打架。
+    """
+    if not AUTO_MANAGE:
         return 0, 0
-    enabled = skipped = 0
+    st = load_quota_state()
+    known = {a["id"] for a in accounts}
+    st["disabled_by_us"] = [i for i in st["disabled_by_us"] if i in known]
+    streaks = st["empty_streak"]
+    enabled = disabled = 0
+    now = time.time()
+
     for a in accounts:
+        aid = a["id"]
+        label = a.get("label") or aid
+        q = a.get("quota") or {}
+        remaining = q.get("remaining", 0) or 0
+        granted = q.get("granted", 0) or 0
+        updated = q.get("updatedAt", 0) or 0
+        fresh = (now - updated) < 900 and (q.get("source") or "") == "api"
+
+        if not a.get("enabled") and remaining > 0:
+            ours = aid in st["disabled_by_us"]
+            marked = bool(DISABLED_MARKER) and DISABLED_MARKER in (a.get("lastError") or "")
+            if not (ours or marked):
+                say(f"  {label}: 有额度 {remaining}，但禁用原因不是脚本/迁移，不动")
+                continue
+            if DRY:
+                say(f"  {label}: [dry-run] 有额度 {remaining}，本该启用")
+                continue
+            code, res = api("PATCH", f"/api/accounts/{aid}", {"enabled": True}, timeout=30)
+            if code == 200 and res.get("ok"):
+                a["enabled"] = True
+                enabled += 1
+                if aid in st["disabled_by_us"]:
+                    st["disabled_by_us"].remove(aid)
+                streaks.pop(aid, None)
+                say(f"  {label}: 有额度 {remaining} → 已启用")
+            else:
+                say(f"  {label}: 启用失败 HTTP {code} {str(res)[:80]}")
+            continue
+
         if a.get("enabled"):
-            continue
-        label = a.get("label") or a.get("id")
-        remaining = (a.get("quota") or {}).get("remaining", 0) or 0
-        if remaining <= 0:
-            continue
-        if DISABLED_MARKER and DISABLED_MARKER not in (a.get("lastError") or ""):
-            skipped += 1
-            say(f"  {label}: 有额度 {remaining} 但禁用原因不是「{DISABLED_MARKER}」，不动")
-            continue
-        if DRY:
-            say(f"  {label}: [dry-run] 有额度 {remaining}，本该自动启用")
-            continue
-        st, res = api("PATCH", f"/api/accounts/{a['id']}", {"enabled": True}, timeout=30)
-        if st == 200 and res.get("ok"):
-            a["enabled"] = True
-            enabled += 1
-            say(f"  {label}: 有额度 {remaining} → 已自动启用")
-        else:
-            say(f"  {label}: 自动启用失败 HTTP {st} {str(res)[:100]}")
-    return enabled, skipped
+            if fresh and granted == 0 and remaining == 0:
+                streaks[aid] = streaks.get(aid, 0) + 1
+                if streaks[aid] < EMPTY_ROUNDS:
+                    say(f"  {label}: 无任何额度（{streaks[aid]}/{EMPTY_ROUNDS}），再观察一轮")
+                    continue
+                if DRY:
+                    say(f"  {label}: [dry-run] 连续 {streaks[aid]} 轮无额度，本该禁用")
+                    continue
+                code, res = api("PATCH", f"/api/accounts/{aid}", {"enabled": False}, timeout=30)
+                if code == 200 and res.get("ok"):
+                    a["enabled"] = False
+                    disabled += 1
+                    if aid not in st["disabled_by_us"]:
+                        st["disabled_by_us"].append(aid)
+                    streaks.pop(aid, None)
+                    say(f"  {label}: 连续 {EMPTY_ROUNDS} 轮无额度 → 已禁用")
+                else:
+                    say(f"  {label}: 禁用失败 HTTP {code} {str(res)[:80]}")
+            else:
+                streaks.pop(aid, None)
+
+    st["empty_streak"] = streaks
+    save_quota_state(st)
+    return enabled, disabled
 
 
 def main():
@@ -188,9 +262,9 @@ def main():
     on = sum(1 for a in accounts if a.get("enabled"))
     say(f"================ 领取轮开始（{len(accounts)} 个账号：启用 {on} / 禁用 {len(accounts)-on}，dry_run={DRY}）================")
 
-    woke, _ = reclaim_pass(accounts)
-    if woke:
-        say(f"  本轮自动启用 {woke} 个账号")
+    woke, slept = manage_pass(accounts)
+    if woke or slept:
+        say(f"  本轮额度启停：启用 {woke} 个、禁用 {slept} 个")
 
     attempts = load_attempts()
     now = time.time()
