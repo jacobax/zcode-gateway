@@ -22,6 +22,8 @@ func (s *Server) webHandler() http.Handler {
 			http.NotFound(w, r)
 			return
 		}
+		// 静态资源让 CDN/浏览器每次都回源校验：面板改版后不该被缓存挡在旧版本
+		w.Header().Set("Cache-Control", "no-cache")
 		if !s.adminAuthed(r) {
 			// Only the login page and its minimal assets are reachable
 			// before authentication.
