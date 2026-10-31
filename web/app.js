@@ -928,6 +928,24 @@ $('log-account').addEventListener('change', (event) => {
   loadLogs();
 });
 
+// ---------- 夜间模式（夜蓝） ----------
+const THEME_KEY = 'zc-theme';
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  const btn = $('theme-toggle');
+  if (!btn) return;
+  btn.textContent = theme === 'dark' ? '☀' : '☾';
+  btn.title = theme === 'dark' ? '切换到日间模式' : '切换到夜间模式（夜蓝）';
+}
+applyTheme(document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light');
+if ($('theme-toggle')) {
+  $('theme-toggle').addEventListener('click', () => {
+    const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+    try { localStorage.setItem(THEME_KEY, next); } catch (e) {}
+    applyTheme(next);
+  });
+}
+
 // Initial load + 30s polling.
 loadOverview();
 loadAccounts();

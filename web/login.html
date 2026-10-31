@@ -5,6 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>登录 · ZCode Gateway</title>
 <link rel="stylesheet" href="/style.css">
+<script>
+  // 夜间模式：与主面板共用 zc-theme
+  try {
+    var t = localStorage.getItem('zc-theme');
+    if (!t) t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    document.documentElement.dataset.theme = t;
+  } catch (e) {}
+</script>
 </head>
 <body class="login-body">
 <div class="login-wrap">

@@ -339,6 +339,52 @@ textarea.input { height: auto; padding: 9px 11px; resize: vertical; line-height:
 .login-hint { margin: 16px 0 0; color: var(--text-3); font-size: 12px; line-height: 1.6; }
 .login-hint code { color: var(--text-2); }
 
+/* ---------- 夜间模式：夜蓝 ---------- */
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --primary: #4c8dff;
+  --primary-hover: #6ea8ff;
+  --primary-soft: rgba(76, 141, 255, 0.16);
+  --success: #3ddc84;
+  --success-soft: rgba(61, 220, 132, 0.14);
+  --warning: #f5b942;
+  --warning-soft: rgba(245, 185, 66, 0.14);
+  --error: #ff6b6b;
+  --error-soft: rgba(255, 107, 107, 0.14);
+  --text: #dce6f7;
+  --text-2: #93a7c4;
+  --text-3: #6b7f9e;
+  --bg: #0a1020;
+  --surface: #121b2e;
+  --surface-2: #17223a;
+  --border: #22304a;
+  --border-strong: #2f415f;
+  --shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+/* 这些地方原来写死了浅色，深色下要单独覆盖 */
+html[data-theme="dark"] .brand-mark { box-shadow: 0 4px 12px rgba(76, 141, 255, 0.35); }
+html[data-theme="dark"] .nav-item.active .nav-count { background: rgba(255, 255, 255, 0.14); color: var(--primary); }
+html[data-theme="dark"] .bar { background: rgba(255, 255, 255, 0.08); }
+html[data-theme="dark"] .tag { background: rgba(255, 255, 255, 0.06); color: var(--text-2); }
+html[data-theme="dark"] .tag.ok { color: #6ee7a0; }
+html[data-theme="dark"] .tag.warn { color: #f7c948; }
+html[data-theme="dark"] .tag.bad { color: #ff8a8a; }
+html[data-theme="dark"] .tag.info { color: #7fb0ff; }
+html[data-theme="dark"] .table td { border-bottom-color: rgba(255, 255, 255, 0.06); }
+html[data-theme="dark"] .table tbody tr:hover { background: rgba(255, 255, 255, 0.04); }
+html[data-theme="dark"] .switch { background: #2a3a56; }
+html[data-theme="dark"] .alert.error { color: #ff8a8a; }
+html[data-theme="dark"] .alert.info { color: #7fb0ff; }
+html[data-theme="dark"] .toast { background: #1b2740; }
+html[data-theme="dark"] .toast.error { background: #b62c2c; }
+html[data-theme="dark"] .modal-backdrop,
+html[data-theme="dark"] .drawer-backdrop { background: rgba(3, 7, 15, 0.68); }
+html[data-theme="dark"] .login-body {
+  background: radial-gradient(1200px 600px at 50% -10%, #16233c 0%, #0a1020 60%);
+}
+html[data-theme="dark"] .icon-btn:hover { background: rgba(255, 255, 255, 0.08); }
+
 /* Activity center */
 .activity-list { display: grid; gap: 10px; }
 .activity-card {
