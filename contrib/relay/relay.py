@@ -35,6 +35,7 @@ import random
 import ssl
 import sys
 import time
+import urllib.parse
 
 LISTEN_HOST, LISTEN_PORT = (os.environ.get("RELAY_LISTEN", "127.0.0.1:3129").rsplit(":", 1))
 LISTEN_PORT = int(LISTEN_PORT)
@@ -308,7 +309,7 @@ async def handle_admin(method, path, query, body, writer):
             if current and entry_addr(current) == addr:
                 rotate_now("当前出口被删除")
             log(f"删除代理 {addr}")
-            await send_json(writer, "200 OK", {"ok": True})
+            await send_json(writer, "200 OK", {"ok": True, "addr": addr})
             return True
 
     return False
@@ -331,7 +332,7 @@ async def handle(client_reader, client_writer):
     for kv in qs.split("&"):
         if "=" in kv:
             k, _, v = kv.partition("=")
-            query.setdefault(k, []).append(v)
+            query.setdefault(urllib.parse.unquote(k), []).append(urllib.parse.unquote(v))
 
     if method != "CONNECT":
         if not is_loopback(client_writer):
