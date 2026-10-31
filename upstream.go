@@ -19,6 +19,10 @@ import (
 type Upstream struct {
 	client   tls_client.HttpClient
 	proxyURL string
+	// 领取/活动调用用的独立客户端：这类请求量大、同 IP 连续打容易吃 3012，
+	// 单独走一个能换出口的代理（通常是本地中继 → 住宅代理池）。
+	claimClient   tls_client.HttpClient
+	claimProxyURL string
 }
 
 func normalizeProxyURL(raw string) (string, error) {
@@ -55,12 +59,7 @@ func proxyDisplay(raw string) string {
 	return u.String()
 }
 
-func NewUpstream() (*Upstream, error) {
-	proxy := envOr("ZCODE_PROXY_URL", envOr("ZCODE_PROXY", ""))
-	proxyURL, err := normalizeProxyURL(proxy)
-	if err != nil {
-		return nil, err
-	}
+func newTLSClient(proxyURL string) (tls_client.HttpClient, error) {
 	options := []tls_client.HttpClientOption{
 		tls_client.WithClientProfile(profiles.Chrome_131),
 		tls_client.WithTimeoutSeconds(300),
@@ -68,15 +67,54 @@ func NewUpstream() (*Upstream, error) {
 	if proxyURL != "" {
 		options = append(options, tls_client.WithProxyUrl(proxyURL))
 	}
-	client, err := tls_client.NewHttpClient(tls_client.NewNoopLogger(), options...)
+	return tls_client.NewHttpClient(tls_client.NewNoopLogger(), options...)
+}
+
+func NewUpstream() (*Upstream, error) {
+	proxy := envOr("ZCODE_PROXY_URL", envOr("ZCODE_PROXY", ""))
+	proxyURL, err := normalizeProxyURL(proxy)
 	if err != nil {
 		return nil, err
 	}
-	return &Upstream{client: client, proxyURL: proxyURL}, nil
+	client, err := newTLSClient(proxyURL)
+	if err != nil {
+		return nil, err
+	}
+	u := &Upstream{client: client, proxyURL: proxyURL, claimClient: client}
+	if raw := envOr("ZCODE_PROXY_URL_CLAIM", ""); raw != "" {
+		claimURL, err := normalizeProxyURL(raw)
+		if err != nil {
+			return nil, err
+		}
+		claimClient, err := newTLSClient(claimURL)
+		if err != nil {
+			return nil, err
+		}
+		u.claimClient = claimClient
+		u.claimProxyURL = claimURL
+	}
+	return u, nil
 }
 
 func (u *Upstream) ProxyURL() string {
 	return u.proxyURL
+}
+
+// ClaimProxyURL 是领取/活动调用实际使用的代理（空 = 与主流量相同）。
+func (u *Upstream) ClaimProxyURL() string {
+	return u.claimProxyURL
+}
+
+// claimDoer 让领取/活动这类调用走独立出口，主流量（模型请求、额度刷新）保持直连。
+type claimDoer struct{ c tls_client.HttpClient }
+
+func (d claimDoer) Do(req *fhttp.Request) (*fhttp.Response, error) {
+	return d.c.Do(req)
+}
+
+// Claim 返回领取/活动调用应使用的 HTTPDoer。
+func (u *Upstream) Claim() HTTPDoer {
+	return claimDoer{c: u.claimClient}
 }
 
 func (u *Upstream) Do(req *fhttp.Request) (*fhttp.Response, error) {

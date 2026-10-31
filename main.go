@@ -71,6 +71,9 @@ func main() {
 	if proxy := upstream.ProxyURL(); proxy != "" {
 		log.Printf("upstream proxy: %s", proxyDisplay(proxy))
 	}
+	if claimProxy := upstream.ClaimProxyURL(); claimProxy != "" {
+		log.Printf("claim/activity proxy: %s", proxyDisplay(claimProxy))
+	}
 	log.Printf("zcode-gateway %s listening on %s (data=%s)", appVersion, baseURL, dataDir)
 	if server.adminGenerated {
 		log.Printf("admin panel password (set ZCODE_ADMIN_PASSWORD to override): %s", server.adminPass)
