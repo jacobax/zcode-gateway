@@ -664,6 +664,28 @@ func (s *Server) recordLog(acc *Account, model string, stream bool, status int, 
 	}
 }
 
+// recordClaimLog 把一次领取的结果写进 logs 表，面板「调用日志」里能直接看到。
+// 领取不是模型请求，token 相关字段留空，mode 固定 claim、model 记套餐名。
+func (s *Server) recordClaimLog(acc *Account, planName string, ok bool, code int, message string, dur time.Duration) {
+	status := code
+	if ok || status == 0 {
+		status = 200
+	}
+	entry := &LogEntry{
+		ID:           randomID(),
+		Time:         time.Now().Unix(),
+		AccountID:    acc.ID,
+		AccountLabel: acc.Label,
+		Model:        planName,
+		Mode:         "claim",
+		Status:       status,
+		OK:           ok,
+		DurationMs:   dur.Milliseconds(),
+		Error:        message,
+	}
+	s.store.appendLog(entry)
+}
+
 func (s *Server) authorized(r *http.Request) bool {
 	token := s.store.Settings().ProxyToken
 	if token == "" {

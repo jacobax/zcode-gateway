@@ -393,7 +393,29 @@ func (s *Server) detectActivities(ctx context.Context, acc *Account) (*ActivityS
 	}, nil
 }
 
+// claimActivity 包一层：把每次领取的结果写进日志表，面板「调用日志」里能直接看到
+// （成功、1003 已领过、3012 风控、3007 验证码失败……都留痕）。
 func (s *Server) claimActivity(ctx context.Context, acc *Account, planID, captchaParam, captchaRegion string) (*ClaimResult, error) {
+	t0 := time.Now()
+	res, err := s.claimActivityInner(ctx, acc, planID, captchaParam, captchaRegion)
+	name := planID
+	ok := false
+	code := 0
+	msg := ""
+	if res != nil {
+		ok, code, msg = res.OK, res.Code, res.Message
+		if res.Plan != nil && res.Plan.Name != "" {
+			name = res.Plan.Name
+		}
+	}
+	if err != nil && msg == "" {
+		msg = err.Error()
+	}
+	s.recordClaimLog(acc, name, ok, code, msg, time.Since(t0))
+	return res, err
+}
+
+func (s *Server) claimActivityInner(ctx context.Context, acc *Account, planID, captchaParam, captchaRegion string) (*ClaimResult, error) {
 	planID = strings.TrimSpace(planID)
 	if planID == "" {
 		return nil, fmt.Errorf("缺少 plan_id")
