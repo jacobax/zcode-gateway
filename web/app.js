@@ -181,6 +181,7 @@ function recentRow(log) {
 }
 
 function statusTag(log) {
+  if (log.mode === 'account') return '<span class="tag info"><span class="dot"></span>事件</span>';
   if (log.ok) return '<span class="tag ok"><span class="dot"></span>成功</span>';
   return `<span class="tag bad"><span class="dot"></span>${esc(log.status ? `失败 ${log.status}` : '失败')}</span>`;
 }
@@ -740,13 +741,42 @@ async function loadSettings() {
     $('setting-quota').value = data.settings.quotaIntervalSec || 30;
     $('setting-base').textContent = data.server.baseUrl;
     $('setting-version').textContent = `v${data.server.version}`;
-    $('setting-datadir').textContent = data.server.dataDir;
+    $('setting-version').textContent = data.server.buildVersion ? `v${data.server.buildVersion}` : '开发构建';
+    if ($('build-version')) $('build-version').textContent = data.server.buildVersion ? `v${data.server.buildVersion}` : '开发构建';
+    if ($('client-version')) $('client-version').textContent = `ZCode ${data.server.version}`;
+    if ($('setting-autoupdate')) $('setting-autoupdate').checked = !data.settings.autoUpdateDisabled;
+    loadUpdate(false);
     if ($('setting-concurrency')) $('setting-concurrency').value = String(data.settings.defaultConcurrency || 1);
     const sourceLabels = { env: '来自环境变量', panel: '面板保存的密码', generated: '本次启动随机生成（已写入面板）', none: '未设置' };
     if ($('password-source')) $('password-source').textContent = sourceLabels[data.passwordSource] || '未知来源';
     renderGuide(data.server.baseUrl, data.settings.proxyToken || '');
   } catch (error) {
     toast(error.message, true);
+  }
+}
+
+async function loadUpdate(force) {
+  if (!$('latest-version')) return;
+  try {
+    const data = await api(`/api/update${force ? '?force=1' : ''}`);
+    state.update = data;
+    if (data.error && !data.latest) {
+      $('latest-version').textContent = '查询失败';
+      $('update-hint').textContent = data.error;
+      return;
+    }
+    $('latest-version').textContent = data.latest || '-';
+    if ($('setting-autoupdate')) $('setting-autoupdate').checked = !!data.autoUpdate;
+    if (data.hasUpdate) {
+      $('update-hint').textContent = data.autoUpdate
+        ? `有新版本 ${data.latest}，下一次自动更新会装上`
+        : `有新版本 ${data.latest}，自动更新已关闭，需要手动跑 autoupdate 脚本`;
+    } else {
+      $('update-hint').textContent = `已是最新（检查于 ${timeText(data.checkedAt)}）`;
+    }
+  } catch (error) {
+    $('latest-version').textContent = '查询失败';
+    $('update-hint').textContent = error.message;
   }
 }
 
@@ -856,6 +886,7 @@ async function saveSettings() {
       uaProfile: $('setting-ua').value,
       quotaIntervalSec: Number($('setting-quota').value) || 30,
       defaultConcurrency: Number($('setting-concurrency').value) || 1,
+      autoUpdate: $('setting-autoupdate').checked,
     };
     // 明文 token 不回显：只有用户真的输入了、或者点了「清除」才提交这个字段。
     if (typedToken) body.proxyToken = typedToken;
@@ -1129,6 +1160,7 @@ $('open-auth-url').addEventListener('click', () => {
 });
 $('submit-callback').addEventListener('click', submitCallback);
 $('save-settings').addEventListener('click', saveSettings);
+$('check-update').addEventListener('click', () => loadUpdate(true));
 $('activity-captcha-fetch').addEventListener('click', fetchCaptchaParam);
 $('generate-token').addEventListener('click', generateProxyToken);
 $('copy-guide').addEventListener('click', () => copyText(state.guide || ''));

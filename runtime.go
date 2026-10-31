@@ -9,6 +9,10 @@ import (
 
 var appVersion = envOr("ZCODE_APP_VERSION", "3.16.3")
 
+// buildVersion 是网关自己的版本，发布时用 -X main.buildVersion=<tag> 注入。
+// 注意它和 appVersion 不是一回事：后者是模拟的 ZCode 客户端版本。
+var buildVersion = "dev"
+
 func envSeconds(key string, fallback int) time.Duration {
 	if raw := os.Getenv(key); raw != "" {
 		if seconds, err := strconv.Atoi(raw); err == nil && seconds > 0 {

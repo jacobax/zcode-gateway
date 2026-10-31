@@ -470,6 +470,7 @@ func (s *Server) claimActivityInner(ctx context.Context, acc *Account, planID, c
 	if nextAt := claimNextAt(data, parsed); nextAt > 0 {
 		result.NextAt = nextAt
 		s.store.SetClaimBlocked(acc.ID, nextAt)
+		s.recordAccountEvent(acc, "领取阻塞", fmt.Sprintf("名额恢复于 %s", time.Unix(nextAt, 0).Format("2006-01-02 15:04")))
 	} else if result.OK {
 		s.store.SetClaimBlocked(acc.ID, 0)
 	}

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -33,6 +34,7 @@ type Server struct {
 	adminGenerated bool
 	adminMu        sync.RWMutex
 	login          *loginThrottle
+	updates        *updateChecker
 }
 
 func NewServer(store *Store, upstream *Upstream, baseURL string) *Server {
@@ -45,6 +47,7 @@ func NewServer(store *Store, upstream *Upstream, baseURL string) *Server {
 		baseURL:  baseURL,
 		version:  appVersion,
 		login:    newLoginThrottle(),
+		updates:  newUpdateChecker(),
 	}
 	server.initAdminPassword()
 	return server
@@ -239,6 +242,13 @@ func (s *Server) handleAccountByID(w http.ResponseWriter, r *http.Request) {
 		if body.Concurrency != nil {
 			s.store.SetConcurrency(id, *body.Concurrency)
 		}
+		if body.Enabled != nil {
+			action := "已启用"
+			if !*body.Enabled {
+				action = "已禁用"
+			}
+			s.recordAccountEvent(s.store.GetAccount(id), action, "面板手动操作")
+		}
 		if body.Enabled != nil && !*body.Enabled {
 			// Disabled is a hard failure: no session may stay pinned to it.
 			s.pool.InvalidateAccount(id)
@@ -355,7 +365,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			"proxyTokenMask": maskToken(real),
 			"proxyTokenSet":  real != "",
 			"server": ServerInfo{
-				Version: s.version, BaseURL: s.baseURL, Fingerprint: settings.Fingerprint,
+				Version: s.version, BuildVersion: buildVersion, BaseURL: s.baseURL, Fingerprint: settings.Fingerprint,
 				QuotaSeconds: settings.QuotaIntervalSec, DataDir: s.store.dir,
 			},
 		})
@@ -368,6 +378,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			DefaultConcurrency *int    `json:"defaultConcurrency"`
 			PromptMode         *string `json:"promptMode"`
 			UAProfile          *string `json:"uaProfile"`
+			AutoUpdate         *bool   `json:"autoUpdate"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			writeError(w, 400, "invalid json")
@@ -401,6 +412,9 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 				case "zcode", "claude-code", "chrome":
 					st.UAProfile = *body.UAProfile
 				}
+			}
+			if body.AutoUpdate != nil {
+				st.AutoUpdateDisabled = !*body.AutoUpdate
 			}
 		})
 		settings := s.store.Settings()
@@ -444,7 +458,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	inFlight, forced := s.pool.Stats()
 	writeJSON(w, 200, map[string]any{
-		"ok": true, "version": s.version, "uptime": time.Since(s.start).Seconds(),
+		"ok": true, "version": s.version, "build": buildVersion, "uptime": time.Since(s.start).Seconds(),
 		"accounts": len(s.store.Summaries()),
 		"pool":     map[string]any{"inFlight": inFlight, "forcedReleases": forced},
 	})
@@ -676,13 +690,20 @@ func (s *Server) applyVerdict(acc *Account, v upstreamVerdict, model string) {
 	switch {
 	case v.Disable:
 		s.store.DisableAccount(acc.ID, v.Reason)
+		s.recordAccountEvent(acc, "已停用", v.Reason)
 	case v.Risk:
 		strikes := s.store.BumpRiskStrikes(acc.ID)
-		s.store.MarkExhausted(acc.ID, time.Now().Add(riskCooldownFor(strikes)), v.Reason)
+		cooldown := riskCooldownFor(strikes)
+		s.store.MarkExhausted(acc.ID, time.Now().Add(cooldown), v.Reason)
+		s.recordAccountEvent(acc, "风控退避", fmt.Sprintf("第 %d 次，冷却 %s：%s", strikes, cooldown, v.Reason))
 	case v.Cooldown > 0:
 		s.store.MarkExhausted(acc.ID, time.Now().Add(v.Cooldown), v.Reason)
+		s.recordAccountEvent(acc, "冷却", fmt.Sprintf("%s：%s", v.Cooldown, v.Reason))
 	case v.ModelScoped && model != "":
-		s.store.RecordModelFailure(acc.ID, model, v.Reason)
+		state := s.store.RecordModelFailure(acc.ID, model, v.Reason)
+		if state.CooldownUntil > 0 || state.Disabled {
+			s.recordAccountEvent(acc, "模型级熔断", fmt.Sprintf("%s stage=%d disabled=%v：%s", model, state.Stage, state.Disabled, v.Reason))
+		}
 	default:
 		// 429 / 验证码这类：账号是健康的，只记原因，不冷却。
 		s.store.NoteFailure(acc.ID, v.Reason)
@@ -827,6 +848,24 @@ func (s *Server) recordClaimLog(acc *Account, planName string, ok bool, code int
 		Error:        message,
 	}
 	s.store.appendLog(entry)
+}
+
+// recordAccountEvent 把账号状态变化写进日志表（mode=account），
+// 面板「请求日志」里能按「账号事件」筛出来，不用再翻 journalctl。
+func (s *Server) recordAccountEvent(acc *Account, action, detail string) {
+	if acc == nil {
+		return
+	}
+	s.store.appendLog(&LogEntry{
+		ID:           randomID(),
+		Time:         time.Now().Unix(),
+		AccountID:    acc.ID,
+		AccountLabel: acc.Label,
+		Model:        action,
+		Mode:         "account",
+		OK:           true,
+		Error:        detail,
+	})
 }
 
 func (s *Server) authorized(r *http.Request) bool {

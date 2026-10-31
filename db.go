@@ -223,10 +223,17 @@ func (d *DB) Logs(limit int, status, accountID string) ([]*LogEntry, error) {
   request_body, response_body FROM logs`
 	args := []any{}
 	where := []string{}
-	if status == "ok" {
-		where = append(where, "ok = 1")
-	} else if status == "error" {
-		where = append(where, "ok = 0")
+	switch status {
+	case "account":
+		// 账号状态变化也进日志表，只是不属于「请求成功/失败」。
+		where = append(where, "mode = 'account'")
+	case "ok":
+		where = append(where, "ok = 1", "mode <> 'account'")
+	case "error":
+		where = append(where, "ok = 0", "mode <> 'account'")
+	default:
+		// 「全部」看的是请求日志；账号事件有专门的筛选项。
+		where = append(where, "mode <> 'account'")
 	}
 	if accountID != "" {
 		where = append(where, "account_id = ?")

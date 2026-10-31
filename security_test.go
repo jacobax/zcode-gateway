@@ -130,3 +130,49 @@ func TestSettingsMasksProxyToken(t *testing.T) {
 		t.Fatalf("reveal endpoint should return the real token, got %q", revealed.Token)
 	}
 }
+
+// 账号状态变化要落进日志表，并且能按「账号事件」筛出来。
+func TestAccountEventsAreLogged(t *testing.T) {
+	dir, err := os.MkdirTemp("", "zcg-events-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = store.Close()
+		_ = os.RemoveAll(dir)
+	})
+	store.accounts = nil
+	store.settings.ProxyToken = ""
+	acc := &Account{
+		ID: "ev-1", Label: "ev-1", Provider: "zai", Mode: "start-plan",
+		User: UserInfo{ID: "ev-user"}, Enabled: true, CreatedAt: 1,
+		Models: map[string]*UsageTotals{}, Quota: Quota{Granted: 100, Remaining: 100},
+	}
+	if err := store.AddAccount(acc); err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(store, mustUpstream(t), "http://test")
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPatch, "/api/accounts/ev-1", strings.NewReader(`{"enabled":false}`))
+	server.handleAccountByID(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("disable account: %d %s", rec.Code, rec.Body.String())
+	}
+
+	events := store.Logs(10, "account", "")
+	if len(events) == 0 {
+		t.Fatal("expected an account event in the log table")
+	}
+	if events[0].Mode != "account" || events[0].Model != "已禁用" || events[0].AccountID != "ev-1" {
+		t.Fatalf("unexpected event: %#v", events[0])
+	}
+	// 普通请求日志不该被这个筛选带出来。
+	if requests := store.Logs(10, "ok", ""); len(requests) != 0 {
+		t.Fatalf("account events must not leak into request logs: %#v", requests)
+	}
+}

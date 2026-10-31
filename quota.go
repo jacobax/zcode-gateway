@@ -227,6 +227,7 @@ func (s *Server) refreshQuota(ctx context.Context, acc *Account) error {
 	if balanceErr != nil && quota.Source == "local" {
 		quota.Error = "" // local accounting is still valid; do not show an API error
 	}
+	prevError := acc.LastError
 	s.store.UpdateAccount(acc.ID, func(a *Account) {
 		a.Quota = quota
 		if currentPlan != nil {
@@ -254,6 +255,18 @@ func (s *Server) refreshQuota(ctx context.Context, acc *Account) error {
 			}
 		}
 	})
+	// 额度耗尽 / 恢复是状态变化，各记一条。只比 LastError：
+	// ExhaustedUntil 在耗尽期间每轮都会往后滚，比它会把日志刷爆。
+	if updated := s.store.GetAccount(acc.ID); updated != nil && updated.LastError != prevError {
+		switch {
+		case updated.LastError == "额度耗尽":
+			s.recordAccountEvent(updated, "额度耗尽", fmt.Sprintf("剩余 %d / 共 %d", quota.Remaining, quota.Granted))
+		case prevError == "额度耗尽" && updated.LastError == "":
+			s.recordAccountEvent(updated, "额度恢复", fmt.Sprintf("剩余 %d / 共 %d", quota.Remaining, quota.Granted))
+		case updated.LastError == "套餐已过期":
+			s.recordAccountEvent(updated, "套餐过期", "上游返回非 active 状态")
+		}
+	}
 	if quota.Granted > 0 && quota.Remaining <= 0 {
 		// Hard failure: no session can stay on an account without quota.
 		s.pool.InvalidateAccount(acc.ID)

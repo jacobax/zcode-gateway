@@ -53,6 +53,27 @@ case "$(uname -m)" in
 esac
 PLATFORM="linux_${ARCH}"
 
+# 面板里关掉自动更新就别动线上二进制；FORCE_REINSTALL=1 仍然可以强制。
+if [ "${FORCE_REINSTALL:-0}" != "1" ]; then
+  AUTO_OFF=$(python3 - "$DATA/accounts.json" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+if not os.path.exists(path):
+    print(0)
+    raise SystemExit
+try:
+    settings = (json.load(open(path)) or {}).get("settings") or {}
+    print(1 if settings.get("autoUpdateDisabled") else 0)
+except Exception:
+    print(0)
+PY
+)
+  if [ "$AUTO_OFF" = "1" ]; then
+    say "面板里已关闭自动更新，本次跳过（FORCE_REINSTALL=1 可强制）"
+    exit 0
+  fi
+fi
+
 say "================ 开始检查更新（release 包）================"
 
 # ---- 1. 查最新 release ----

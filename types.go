@@ -185,6 +185,8 @@ type Settings struct {
 	// AdminPasswordManual 表示密码是在面板里设的：只有这种情况才压过环境变量。
 	// 首次启动自动生成的 hash 不带这个标记，否则老部署会被它顶掉 env 密码。
 	AdminPasswordManual bool `json:"adminPasswordManual,omitempty"`
+	// AutoUpdateDisabled 关掉后，宿主机的 zcode-gateway-autoupdate.sh 会直接跳过。
+	AutoUpdateDisabled bool `json:"autoUpdateDisabled,omitempty"`
 }
 
 type Overview struct {
@@ -208,7 +210,8 @@ type Overview struct {
 }
 
 type ServerInfo struct {
-	Version      string `json:"version"`
+	Version      string `json:"version"`       // 模拟的 ZCode 客户端版本
+	BuildVersion string `json:"buildVersion"`  // 网关自身版本（发布 tag）
 	BaseURL      string `json:"baseUrl"`
 	Fingerprint  bool   `json:"fingerprint"`
 	QuotaSeconds int    `json:"quotaSeconds"`

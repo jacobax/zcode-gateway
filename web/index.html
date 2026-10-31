@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ZCode Gateway</title>
-<link rel="stylesheet" href="/style.css?v=9">
+<link rel="stylesheet" href="/style.css?v=10">
 <script>
   // 夜间模式：在首屏渲染前决定主题，避免闪白
   try {
@@ -178,6 +178,7 @@
             <option value="">全部状态</option>
             <option value="ok">成功</option>
             <option value="error">失败</option>
+            <option value="account">账号事件</option>
           </select>
           <select class="input compact" id="log-account">
             <option value="">全部账号</option>
@@ -254,6 +255,20 @@
           <small>Token 就是上面「本地访问」里那个，留空表示本机免鉴权（仅回环地址安全）。</small>
         </div>
         <div class="card">
+          <div class="card-head">
+            <div><div class="card-kicker">版本</div><h2>版本与更新</h2></div>
+            <button class="btn ghost" id="check-update">检查更新</button>
+          </div>
+          <div class="info-row"><span>网关</span><code id="build-version">-</code></div>
+          <div class="info-row"><span>模拟客户端</span><code id="client-version">-</code></div>
+          <div class="info-row"><span>最新发布</span><code id="latest-version">-</code></div>
+          <label class="field switch-field">
+            <span><strong>自动更新</strong><small>宿主机 <code>zcode-gateway-autoupdate.sh</code> 每天 05:50 查一次最新 release；关掉后脚本直接跳过。</small></span>
+            <input type="checkbox" id="setting-autoupdate" class="switch">
+          </label>
+          <small id="update-hint">「检查更新」会问 GitHub 最新 release，结果缓存 10 分钟。</small>
+        </div>
+        <div class="card">
           <div class="card-head"><div><div class="card-kicker">上游</div><h2>指纹与额度</h2></div></div>
           <label class="field switch-field">
             <span><strong>Start Plan system 指纹</strong><small>关闭后上游会返回 3012；仅用于排查。</small></span>
@@ -289,7 +304,7 @@
             <small>每个账号同时在途的请求数。账号自己在「账号管理」里设了并发，就以账号的为准。</small>
           </label>
           <div class="info-row"><span>API Base</span><code id="setting-base">-</code></div>
-          <div class="info-row"><span>版本</span><code id="setting-version">-</code></div>
+          <div class="info-row"><span>网关版本</span><code id="setting-version">-</code></div>
           <div class="info-row"><span>数据目录</span><code id="setting-datadir">-</code></div>
         </div>
         <div class="card">
@@ -420,6 +435,6 @@
 </div>
 
 <div class="toast" id="toast"></div>
-<script src="/app.js?v=9"></script>
+<script src="/app.js?v=10"></script>
 </body>
 </html>

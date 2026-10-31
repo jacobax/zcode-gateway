@@ -67,7 +67,7 @@ jobs:
           BIN=zcode-gateway
           if [ "$GOOS" = "windows" ]; then BIN=zcode-gateway.exe; fi
           mkdir -p pkg
-          go build -trimpath -ldflags="-s -w" -o "pkg/$BIN" .
+          go build -trimpath -ldflags="-s -w -X main.buildVersion=${VERSION}" -o "pkg/$BIN" .
           # 打包完整可部署内容：二进制 + 中继/领取脚本 + systemd 单元 + 运维文档
           cp README.md OPERATIONS.md pkg/
           cp -r contrib deploy pkg/
