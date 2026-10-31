@@ -208,6 +208,14 @@ def manage_pass(accounts):
     for a in accounts:
         aid = a["id"]
         label = a.get("label") or aid
+        if not a.get("enabled"):
+            # 网关的定时刷新会跳过禁用账号，额度会永远停在禁用那一刻；
+            # 这里主动刷一次，否则"有额度就启用"永远触发不了。
+            rst, rres = api("POST", f"/api/accounts/{aid}/refresh", {}, timeout=60)
+            if rst == 200 and isinstance(rres.get("account"), dict):
+                a = {**a, **rres["account"]}
+            elif rst != 200:
+                say(f"  {label}: 刷新额度失败 HTTP {rst} {str(rres)[:60]}")
         q = a.get("quota") or {}
         remaining = q.get("remaining", 0) or 0
         granted = q.get("granted", 0) or 0
