@@ -742,6 +742,7 @@ func writeUpstreamError(w http.ResponseWriter, status int, body []byte) {
 
 func decodeJSON(r *http.Request, target any) error {
 	return json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(target)
+}
 
 // handleProxies 把面板里的代理池操作转发给本地中继（contrib/relay 的管理口）。
 // 中继只监听回环，网关是它唯一入口，所以鉴权沿用面板登录态。
@@ -786,7 +787,6 @@ func (s *Server) handleProxies(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
-}
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
