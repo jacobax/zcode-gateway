@@ -75,15 +75,26 @@ PUT >94:
 
 ## 面板密码与并发
 
-- **面板密码**：设置页「面板密码」可以直接改，写入 `data/accounts.json` 的 `adminPasswordHash`（bcrypt）。
-  一旦在面板里设过，环境变量 `ZCODE_ADMIN_PASSWORD` 就只是「还没设过时」的初始值，启动日志会打
 - **面板密码**：设置页「面板密码」可以直接改，写入 `data/accounts.json` 的 `adminPasswordHash`（bcrypt）
-  \+ `adminPasswordManual: true`。**只有带 `manual` 标记的 hash 才压过环境变量**；首次启动自动生成的
-  hash 不带这个标记，否则老部署会被它顶掉 `ZCODE_ADMIN_PASSWORD` 而锁在门外（v1.3.1 踩过）。
-  改密码会踢掉其它浏览器上的登录。忘了密码：把 `adminPasswordHash` 和 `adminPasswordManual` 一起删掉
-  再重启，会回落到环境变量；两者都没有则随机生成并打到启动日志。
-  设了并发就以账号为准（下拉选「跟随」= 用全局值）。账号表「并发」列鼠标悬停能看到实际生效值。
+  + `adminPasswordManual: true`。**只有带 `manual` 标记的 hash 才压过环境变量**；首次启动自动生成的
+  hash 不带这个标记，否则老部署会被它顶掉 `ZCODE_ADMIN_PASSWORD` 而锁在门外。改密码会踢掉其它浏览器上
+  的登录。忘了密码：把 `adminPasswordHash` 和 `adminPasswordManual` 一起删掉再重启，会回落到环境变量；
+  两者都没有则随机生成并打到启动日志。
+- **并发**：`设置 → 全局默认并发`（1–5，默认 1）是每个账号的默认同时在途请求数；「账号管理」里给某个
+  账号单独设了并发就以账号为准（下拉选「跟随」= 用全局值）。账号表「并发」列鼠标悬停能看到实际生效值。
   上游对单账号并发有上限，超过 5 没有意义。
+
+## 发版节奏
+
+`release.yml` 是 tag 驱动的：推一个 `v*` tag 就出一套六平台包。所以**一个 fix 一个 tag 会把版本刷爆**，
+之前一轮连发 v1.3.0/1/2 就是这么来的。约定：
+
+1. 改动先合到 `main`，本地跑 `go vet ./... && go test ./...` + `scripts/scan-secrets.sh`；
+2. 攒够一批（或要上生产）再打 tag，一次只打一个；
+3. 打完等 `Release` workflow 绿，再跑 `zcode-gateway-autoupdate.sh` 上线；
+4. 打包内容由 `scripts/verify-package.sh` 把关，它挂了就别发。
+
+`main` 领先于最新 release 是正常的——VPS 只跟 release，不跟 `main`。
 
 ## 已知坑（都踩过）
 
