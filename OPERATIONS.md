@@ -84,6 +84,49 @@ PUT >94:
   账号单独设了并发就以账号为准（下拉选「跟随」= 用全局值）。账号表「并发」列鼠标悬停能看到实际生效值。
   上游对单账号并发有上限，超过 5 没有意义。
 
+
+## 错误分级与调度
+
+上游失败不再压成一个 cooldown 数字，而是拆成「要不要重试 / 等多久 / 账号伤不伤」
+（见 `classify.go`）。核心判断：**429 是频控不是故障，冷却它等于自己减员**。
+
+| 上游信号 | 处置 | 账号状态 |
+|---|---|---|
+| 429 频控 | 按 `Retry-After` 原地等（默认 5s，封顶 120s，总预算 `ZCODE_RETRY_WAIT_SEC`=20s），耗尽才换号 | 保持可用，不计连败 |
+| 1113 无资源包 | 不等待，直接换号；只记模型级失败 | 保持可用 |
+| 3007 验证码被拒 | 换码重试（下一次请求会重新求解） | 保持可用 |
+| 内容策略拦截 | 视为 system 指纹误报，换号重试 | 保持可用 |
+| 5xx | 冷却 5 分钟后换号 | `cooling` |
+| 3012 风控 | 不原地重试，指数退避 15min 起翻倍封顶 24h（`riskStrikes` 累计） | `cooling` |
+| 401/403/3004 | 直接停用，等人工重新授权 | `disabled` |
+
+选号从纯随机改成「余额占比 + 闲置时长」加权：先按权重取前 N（`ZCODE_POOL_TOPN`，默认 5）
+做加权抽签，短名单之外再按权重降序兜底，保证每个健康账号仍会被试到。
+
+## OpenAI 兼容端点
+
+`POST /v1/chat/completions` 和 `/v1/messages` 并存，重试/降级逻辑共用一份 `relay()`。
+入站把 chat.completions 翻成 Anthropic，出站把响应或 SSE 翻回 `chat.completion`：
+
+- 支持文本、`image_url` 的 data URI、`tools[].function`、`role:tool` 的 tool 结果、
+  `stop`、`temperature`/`top_p`、`max_tokens`（缺省补 4096，Anthropic 必填）。
+- `tool_choice` 上游会忽略，网关仍按规范映射，但别指望它强制调用。
+- 流式会把 Anthropic 的 `message_start`/`content_block_delta`/`message_delta`
+  翻成 `chat.completion.chunk`，末尾补 `data: [DONE]`。
+
+## 领取退避
+
+`1005 名额用完` 的上游回执带 `next_at` 时，网关把它记进账号的 `claimBlockedUntil`，
+`contrib/claimer` 会跳过还没到点的账号；回执没带 `next_at` 才回落到固定 6 小时缓存。
+好处是省验证码——每解一次码都要开一次 Chromium。
+
+## 面板安全
+
+- **登录爆破防护**：同 IP 连续失败 5 次锁 5 分钟，来源优先取 `Cf-Connecting-Ip`
+  （cloudflared 会带），其次 `X-Forwarded-For` 第一跳。
+- **token 不回显**：`GET /api/settings` 只返回掩码（`sk-zc…abcd`）与 `proxyTokenSet`，
+  明文走 `GET /api/settings/token`；面板里点「复制」才去取一次。留空＝不修改，
+  点「清除」再保存才会清空。
 ## 发版节奏
 
 `release.yml` 是 tag 驱动的：推一个 `v*` tag 就出一套六平台包。所以**一个 fix 一个 tag 会把版本刷爆**，

@@ -387,6 +387,91 @@ func (s *Store) MarkExhausted(id string, until time.Time, reason string) {
 	_ = s.Save()
 }
 
+// BumpRiskStrikes 记一次风控并返回累计次数；冷却时长由它决定指数退避。
+func (s *Store) BumpRiskStrikes(id string) int {
+	strikes := 0
+	s.mu.Lock()
+	for _, acc := range s.accounts {
+		if acc.ID == id {
+			acc.RiskStrikes++
+			strikes = acc.RiskStrikes
+			break
+		}
+	}
+	s.mu.Unlock()
+	_ = s.Save()
+	return strikes
+}
+
+// ResetRiskStrikes 在一次成功请求后清空风控计数，让账号回到正常退避节奏。
+func (s *Store) ResetRiskStrikes(id string) {
+	s.mu.Lock()
+	changed := false
+	for _, acc := range s.accounts {
+		if acc.ID == id {
+			if acc.RiskStrikes != 0 {
+				acc.RiskStrikes = 0
+				changed = true
+			}
+			break
+		}
+	}
+	s.mu.Unlock()
+	if changed {
+		_ = s.Save()
+	}
+}
+
+// SetClaimBlocked 记录该账号下次可以再试领取的时间（0 = 清空）。
+func (s *Store) SetClaimBlocked(id string, until int64) {
+	s.mu.Lock()
+	changed := false
+	for _, acc := range s.accounts {
+		if acc.ID == id {
+			if acc.ClaimBlockedUntil != until {
+				acc.ClaimBlockedUntil = until
+				changed = true
+			}
+			break
+		}
+	}
+	s.mu.Unlock()
+	if changed {
+		_ = s.Save()
+	}
+}
+
+// DisableAccount 把凭据失效的账号停用，避免每轮都拿它去撞一次 401。
+func (s *Store) DisableAccount(id, reason string) {
+	s.mu.Lock()
+	for _, acc := range s.accounts {
+		if acc.ID == id {
+			acc.Enabled = false
+			acc.LastError = reason
+			acc.LastErrorAt = time.Now().Unix()
+			if s.settings.ActiveAccountID == id {
+				s.settings.ActiveAccountID = ""
+			}
+			break
+		}
+	}
+	s.mu.Unlock()
+	_ = s.Save()
+}
+
+// NoteFailure 只记原因不冷却：用于 429/验证码这类「账号没坏」的失败。
+func (s *Store) NoteFailure(id, reason string) {
+	s.mu.Lock()
+	for _, acc := range s.accounts {
+		if acc.ID == id {
+			acc.LastError = reason
+			acc.LastErrorAt = time.Now().Unix()
+			break
+		}
+	}
+	s.mu.Unlock()
+}
+
 func (s *Store) UpdateAccount(id string, fn func(*Account)) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -584,6 +669,7 @@ func (s *Store) Summaries() []*AccountSummary {
 			Quota:                acc.Quota,
 			LastError:            acc.LastError,
 			ExhaustedUntil:       acc.ExhaustedUntil,
+			ClaimBlockedUntil:    acc.ClaimBlockedUntil,
 			LastUsedAt:           lastUsed,
 			CreatedAt:            acc.CreatedAt,
 			Usage:                acc.Usage,

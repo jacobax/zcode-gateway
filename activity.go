@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -66,6 +67,7 @@ type ClaimResult struct {
 	Message        string        `json:"message,omitempty"`
 	UpstreamStatus int           `json:"upstreamStatus,omitempty"`
 	Plan           *ActivityPlan `json:"plan,omitempty"`
+	NextAt         int64         `json:"nextAt,omitempty"` // 名额恢复时间（unix 秒），1005 时上游会给
 }
 
 func (s *Server) activityHeaders(acc *Account) map[string]string {
@@ -464,6 +466,13 @@ func (s *Server) claimActivityInner(ctx context.Context, acc *Account, planID, c
 		normalized := activityPlanFromMap(plan)
 		result.Plan = &normalized
 	}
+	// 1005「名额用完」会带 next_at：按它退避，别每小时拿验证码去撞空。
+	if nextAt := claimNextAt(data, parsed); nextAt > 0 {
+		result.NextAt = nextAt
+		s.store.SetClaimBlocked(acc.ID, nextAt)
+	} else if result.OK {
+		s.store.SetClaimBlocked(acc.ID, 0)
+	}
 	return result, nil
 }
 
@@ -647,4 +656,64 @@ func activityPlanFromMap(m map[string]any) ActivityPlan {
 		})
 	}
 	return plan
+}
+
+// claimNextAt 从领取回执里找名额恢复时间：1005 时上游会带 next_at。
+func claimNextAt(data map[string]any, root map[string]any) int64 {
+	sources := []map[string]any{data, activityMap(data["plan"]), root}
+	for _, source := range sources {
+		if source == nil {
+			continue
+		}
+		for _, key := range []string{"next_at", "nextAt", "next_claim_at", "nextClaimAt"} {
+			if value, ok := source[key]; ok {
+				if ts := parseNextAt(value); ts > 0 {
+					return ts
+				}
+			}
+		}
+	}
+	return 0
+}
+
+// parseNextAt 兼容秒/毫秒时间戳和常见日期字符串。
+func parseNextAt(value any) int64 {
+	switch v := value.(type) {
+	case float64:
+		return normalizeEpoch(int64(v))
+	case json.Number:
+		n, err := v.Int64()
+		if err != nil {
+			return 0
+		}
+		return normalizeEpoch(n)
+	case int64:
+		return normalizeEpoch(v)
+	case int:
+		return normalizeEpoch(int64(v))
+	case string:
+		text := strings.TrimSpace(v)
+		if text == "" {
+			return 0
+		}
+		if n, err := strconv.ParseInt(text, 10, 64); err == nil {
+			return normalizeEpoch(n)
+		}
+		for _, layout := range []string{time.RFC3339, "2006-01-02 15:04:05", "2006-01-02T15:04:05"} {
+			if t, err := time.ParseInLocation(layout, text, time.Local); err == nil {
+				return t.Unix()
+			}
+		}
+	}
+	return 0
+}
+
+func normalizeEpoch(n int64) int64 {
+	if n <= 0 {
+		return 0
+	}
+	if n > 1_000_000_000_000 { // 毫秒
+		return n / 1000
+	}
+	return n
 }

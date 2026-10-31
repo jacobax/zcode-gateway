@@ -5,10 +5,13 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -173,6 +176,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 405, "method not allowed")
 		return
 	}
+	ip := clientIP(r)
+	if wait, blocked := s.login.blocked(ip); blocked {
+		w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
+		writeError(w, 429, fmt.Sprintf("密码错误次数过多，请 %d 秒后再试", int(wait.Seconds())+1))
+		return
+	}
 	var body struct {
 		Password string `json:"password"`
 	}
@@ -181,9 +190,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.passwordMatches(strings.TrimSpace(body.Password)) {
+		s.login.fail(ip)
 		writeError(w, 401, "密码错误")
 		return
 	}
+	s.login.reset(ip)
 	if _, err := s.newAdminSession(w); err != nil {
 		writeError(w, 500, err.Error())
 		return
@@ -215,3 +226,71 @@ func (s *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 		next(w, r)
 	}
 }
+
+const (
+	loginMaxFails = 5
+	loginLockout  = 5 * time.Minute
+)
+
+type loginFail struct {
+	count int
+	until time.Time
+}
+
+// loginThrottle 按来源 IP 记失败次数：面板挂在公网上，没有这个就是无限次爆破。
+type loginThrottle struct {
+	mu    sync.Mutex
+	fails map[string]*loginFail
+}
+
+func newLoginThrottle() *loginThrottle {
+	return &loginThrottle{fails: map[string]*loginFail{}}
+}
+
+// blocked 返回还要等多久；锁定期已过的条目顺手清掉，重新开始计数。
+func (t *loginThrottle) blocked(ip string) (time.Duration, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	entry, ok := t.fails[ip]
+	if !ok {
+		return 0, false
+	}
+	now := time.Now()
+	if entry.until.After(now) {
+		return entry.until.Sub(now), true
+	}
+	if !entry.until.IsZero() {
+		delete(t.fails, ip)
+	}
+	return 0, false
+}
+
+func (t *loginThrottle) fail(ip string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	entry, ok := t.fails[ip]
+	if !ok {
+		if len(t.fails) > 2048 {
+			cutoff := time.Now().Add(-loginLockout)
+			for key, item := range t.fails {
+				if item.until.Before(cutoff) {
+					delete(t.fails, key)
+				}
+			}
+		}
+		entry = &loginFail{}
+		t.fails[ip] = entry
+	}
+	entry.count++
+	if entry.count >= loginMaxFails {
+		entry.count = 0
+		entry.until = time.Now().Add(loginLockout)
+	}
+}
+
+func (t *loginThrottle) reset(ip string) {
+	t.mu.Lock()
+	delete(t.fails, ip)
+	t.mu.Unlock()
+}
+

@@ -297,6 +297,11 @@ def main():
     todo, skipped = [], 0
     for a in accounts:
         aid, label = a.get("id"), a.get("label") or a.get("id")
+        blocked_until = int(a.get("claimBlockedUntil") or 0)
+        if blocked_until > now:
+            say(f"  {label}: 名额未恢复，{int(blocked_until - now)}s 后再试，跳过")
+            skipped += 1
+            continue
         st, snap = api("GET", f"/api/accounts/{aid}/activities", timeout=60)
         if st != 200:
             say(f"  {label}: 活动查询失败 HTTP {st} {str(snap)[:100]}")
@@ -309,9 +314,12 @@ def main():
             if REQUIRE_CLAIMABLE and not p.get("claimable"):
                 continue
             prev = attempts.get(f"{aid}|{plan_id}")
-            if prev and prev.get("code") in SKIP_CODES and now - prev.get("ts", 0) < RETRY_SKIP_HOURS * 3600:
-                skipped += 1
-                continue
+            if prev and prev.get("code") in SKIP_CODES:
+                # 上游给了 next_at 就按它退避，否则用固定的失败缓存时长
+                deadline = prev.get("until") or (prev.get("ts", 0) + RETRY_SKIP_HOURS * 3600)
+                if now < deadline:
+                    skipped += 1
+                    continue
             todo.append((aid, label, plan_id, p.get("name"),
                          cap.get("sceneId"), cap.get("region"), cap.get("prefix")))
 
@@ -362,7 +370,10 @@ def main():
             say(f"    ✅ 领取成功 {name}")
         else:
             failed += 1
-            attempts[f"{aid}|{plan_id}"] = {"code": code, "ts": now, "msg": str(res.get("message"))[:80]}
+            attempts[f"{aid}|{plan_id}"] = {
+                "code": code, "ts": now, "msg": str(res.get("message"))[:80],
+                "until": int(res.get("nextAt") or 0),
+            }
             say(f"    ❌ 领取失败 HTTP {st} code={code} msg={res.get('message')!r}")
             streak_3012 = streak_3012 + 1 if code == 3012 else 0
         save_attempts(attempts)
@@ -370,7 +381,6 @@ def main():
             say("  连续 3 次 3012 风控，本轮提前结束（这些项 6 小时内不再重试）")
             break
 
-    say(f"  本轮结束：成功 {claimed}，失败 {failed}，缓存跳过 {skipped}")
     say(f"  本轮结束：成功 {claimed}，失败 {failed}，缓存跳过 {skipped}")
     return 0
 

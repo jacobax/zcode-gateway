@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ZCode Gateway</title>
-<link rel="stylesheet" href="/style.css?v=8">
+<link rel="stylesheet" href="/style.css?v=9">
 <script>
   // 夜间模式：在首屏渲染前决定主题，避免闪白
   try {
@@ -213,6 +213,7 @@
               <input class="input mono" id="setting-token" placeholder="留空则本机免鉴权" autocomplete="off" spellcheck="false">
               <button class="btn" id="generate-token">随机生成 sk-</button>
               <button class="btn" id="copy-token">复制</button>
+              <button class="btn" id="clear-token">清除</button>
             </div>
             <small>生成后点“保存设置”生效；客户端需带 <code>Authorization: Bearer &lt;token&gt;</code> 或 <code>x-api-key</code>。</small>
           </label>
@@ -419,6 +420,6 @@
 </div>
 
 <div class="toast" id="toast"></div>
-<script src="/app.js?v=8"></script>
+<script src="/app.js?v=9"></script>
 </body>
 </html>

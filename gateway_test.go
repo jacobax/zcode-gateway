@@ -95,21 +95,130 @@ func TestParseUsageAndStreamTracker(t *testing.T) {
 	}
 }
 
-func TestClassifyRateLimit(t *testing.T) {
-	retry, cooldown, reason, rateLimited := classifyUpstream(429, []byte(`{"msg":"model concurrency limit exceeded"}`))
-	if !retry || !rateLimited || cooldown != time.Minute || reason == "" {
-		t.Fatalf("unexpected 429 classification: retry=%v cooldown=%v reason=%q rate=%v", retry, cooldown, reason, rateLimited)
+func TestClassifyUpstream(t *testing.T) {
+	withRetryAfter := func(value string) string { return value }
+	cases := []struct {
+		name    string
+		status  int
+		header  string
+		body    string
+		check   func(t *testing.T, v upstreamVerdict)
+	}{
+		{
+			name: "429 原地等 Retry-After，不冷却账号", status: 429,
+			header: withRetryAfter("7"),
+			body:   `{"msg":"model concurrency limit exceeded"}`,
+			check: func(t *testing.T, v upstreamVerdict) {
+				if !v.Retry || !v.RateLimited || v.Cooldown != 0 || v.Wait != 7*time.Second {
+					t.Fatalf("429 should wait without cooling: %#v", v)
+				}
+			},
+		},
+		{
+			name: "429 缺 Retry-After 用默认等待", status: 429,
+			header: withRetryAfter(""),
+			body:   `{}`,
+			check: func(t *testing.T, v upstreamVerdict) {
+				if v.Wait != defaultRetryAfter || v.Cooldown != 0 {
+					t.Fatalf("429 without Retry-After should fall back to the default wait: %#v", v)
+				}
+			},
+		},
+		{
+			name: "1113 永久态：换号但不等待也不冷却", status: 400,
+			header: withRetryAfter(""),
+			body:   `{"code":1113,"msg":"no resource pack"}`,
+			check: func(t *testing.T, v upstreamVerdict) {
+				if !v.Retry || v.Wait != 0 || v.Cooldown != 0 || !v.ModelScoped {
+					t.Fatalf("1113 should switch account without waiting: %#v", v)
+				}
+			},
+		},
+		{
+			name: "401 直接停用账号", status: 401,
+			header: withRetryAfter(""),
+			body:   `{"msg":"unauthorized"}`,
+			check: func(t *testing.T, v upstreamVerdict) {
+				if !v.Retry || !v.Disable {
+					t.Fatalf("401 should disable the account: %#v", v)
+				}
+			},
+		},
+		{
+			name: "3012 走风控退避且不算限流", status: 405,
+			header: withRetryAfter(""),
+			body:   `{"code":3012,"msg":"unusual activity"}`,
+			check: func(t *testing.T, v upstreamVerdict) {
+				if !v.Retry || !v.Risk || v.RateLimited || v.Wait != 0 {
+					t.Fatalf("3012 should back off without in-place retry: %#v", v)
+				}
+			},
+		},
+		{
+			name: "5xx 冷却但不停用", status: 502,
+			header: withRetryAfter(""),
+			body:   `{"msg":"bad gateway"}`,
+			check: func(t *testing.T, v upstreamVerdict) {
+				if !v.Retry || v.Cooldown != serverErrorCooldown || v.Disable {
+					t.Fatalf("5xx should cool down the account: %#v", v)
+				}
+			},
+		},
+		{
+			name: "3007 验证码被拒：换码重试，不伤账号", status: 400,
+			header: withRetryAfter(""),
+			body:   `{"code":3007,"msg":"captcha rejected"}`,
+			check: func(t *testing.T, v upstreamVerdict) {
+				if !v.Retry || v.Cooldown != 0 || v.Disable || v.Wait != 0 {
+					t.Fatalf("3007 must not damage the account: %#v", v)
+				}
+			},
+		},
+		{
+			name: "内容策略拦截按误报处理", status: 400,
+			header: withRetryAfter(""),
+			body:   `{"msg":"Illegal API invocation from an unapproved channel"}`,
+			check: func(t *testing.T, v upstreamVerdict) {
+				if !v.Retry || v.Cooldown != 0 {
+					t.Fatalf("content policy reject should retry without cooling: %#v", v)
+				}
+			},
+		},
+		{
+			name: "普通 400 不重试", status: 400,
+			header: withRetryAfter(""),
+			body:   `{"msg":"bad request"}`,
+			check: func(t *testing.T, v upstreamVerdict) {
+				if v.Retry {
+					t.Fatalf("plain 400 should not be retried: %#v", v)
+				}
+			},
+		},
 	}
-	retry, cooldown, _, rateLimited = classifyUpstream(400, []byte(`{"code":1113,"msg":"limit"}`))
-	if !retry || !rateLimited || cooldown != time.Minute {
-		t.Fatalf("unexpected code 1113 classification: retry=%v cooldown=%v rate=%v", retry, cooldown, rateLimited)
-	}
-	_, _, _, rateLimited = classifyUpstream(405, []byte(`{"code":3012}`))
-	if rateLimited {
-		t.Fatal("3012 must not be treated as a rate-limit streak")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.check(t, classifyUpstream(tc.status, tc.header, []byte(tc.body)))
+		})
 	}
 	if rateLimitFreezeAfter != 3 {
 		t.Fatalf("rate limit threshold changed: %d", rateLimitFreezeAfter)
+	}
+}
+
+func TestRiskCooldownBackoff(t *testing.T) {
+	cases := map[int]time.Duration{
+		1: riskCooldownBase,
+		2: riskCooldownBase * 2,
+		3: riskCooldownBase * 4,
+		0: riskCooldownBase,
+	}
+	for strikes, want := range cases {
+		if got := riskCooldownFor(strikes); got != want {
+			t.Fatalf("riskCooldownFor(%d) = %v, want %v", strikes, got, want)
+		}
+	}
+	if got := riskCooldownFor(64); got != riskCooldownMax {
+		t.Fatalf("risk cooldown should cap at %v, got %v", riskCooldownMax, got)
 	}
 }
 
@@ -261,6 +370,58 @@ func TestGlobalDefaultConcurrencyWithAccountOverride(t *testing.T) {
 	}
 }
 
+// 429 是频控不是故障：不该记模型连败，也不该把账号踢出池。
+func TestRateLimit429DoesNotBurnAccount(t *testing.T) {
+	dir, err := os.MkdirTemp("", "zcg-429-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = store.Close()
+		_ = os.RemoveAll(dir)
+	})
+	store.accounts = nil
+	store.settings.ProxyToken = ""
+	acc := &Account{
+		ID: "rl-429", Label: "rl-429", Provider: "zai", Mode: "start-plan",
+		User: UserInfo{ID: "rl-user"}, Enabled: true, CreatedAt: 1,
+		ZcodeJWT: "fake-token", Models: map[string]*UsageTotals{},
+		Quota: Quota{Granted: 1000, Remaining: 1000},
+	}
+	if err := store.AddAccount(acc); err != nil {
+		t.Fatal(err)
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "1")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"msg":"rate limited"}`))
+	}))
+	t.Cleanup(upstream.Close)
+	t.Setenv("ZCODE_UPSTREAM", upstream.URL+"/v1/messages")
+	// 关掉原地等待预算，让请求一次就放弃，测试不需要真的睡。
+	t.Setenv("ZCODE_RETRY_WAIT_SEC", "0")
+	server := NewServer(store, mustUpstream(t), "http://test")
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"GLM-5.3-Flash","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	server.handleMessages(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 passthrough, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if state, ok := store.ModelStateFor("rl-429", "GLM-5.3-Flash"); ok && state.Streak != 0 {
+		t.Fatalf("429 must not build a model streak: %#v", state)
+	}
+	if got := store.GetAccount("rl-429"); got == nil || got.ExhaustedUntil != 0 || !got.Enabled {
+		t.Fatalf("429 must leave the account healthy: %#v", got)
+	}
+}
 func TestRateLimitFreezesAfterThreeConsecutiveFailures(t *testing.T) {
 	dir, err := os.MkdirTemp("", "zcg-rate-test-")
 	if err != nil {

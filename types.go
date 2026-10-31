@@ -106,6 +106,8 @@ type Account struct {
 	LastError          string                  `json:"lastError,omitempty"`
 	LastErrorAt        int64                   `json:"lastErrorAt,omitempty"`
 	RateLimitStreak    int                     `json:"rateLimitStreak,omitempty"`
+	RiskStrikes        int                     `json:"riskStrikes,omitempty"`
+	ClaimBlockedUntil  int64                   `json:"claimBlockedUntil,omitempty"`
 	DeviceMid          string                  `json:"-"`
 	Profile            *DeviceProfile          `json:"-"`
 	Concurrency        int                     `json:"-"`
@@ -239,6 +241,7 @@ type AccountSummary struct {
 	Quota                Quota        `json:"quota"`
 	LastError            string       `json:"lastError,omitempty"`
 	ExhaustedUntil       int64        `json:"exhaustedUntil,omitempty"`
+	ClaimBlockedUntil    int64        `json:"claimBlockedUntil,omitempty"`
 	LastUsedAt           int64        `json:"lastUsedAt,omitempty"`
 	CreatedAt            int64        `json:"createdAt"`
 	Usage                UsageTotals  `json:"usage"`

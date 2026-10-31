@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"net"
@@ -33,6 +32,7 @@ type Server struct {
 	adminHash      string
 	adminGenerated bool
 	adminMu        sync.RWMutex
+	login          *loginThrottle
 }
 
 func NewServer(store *Store, upstream *Upstream, baseURL string) *Server {
@@ -44,6 +44,7 @@ func NewServer(store *Store, upstream *Upstream, baseURL string) *Server {
 		start:    time.Now(),
 		baseURL:  baseURL,
 		version:  appVersion,
+		login:    newLoginThrottle(),
 	}
 	server.initAdminPassword()
 	return server
@@ -67,7 +68,7 @@ func (s *Server) summary(acc *Account) *AccountSummary {
 		Priority: acc.Priority, Enabled: acc.Enabled, Status: status,
 		Concurrency: normalizeConcurrency(acc.Concurrency), ConcurrencyEffective: s.store.EffectiveConcurrency(acc),
 		User: acc.User, Quota: acc.Quota, LastError: acc.LastError,
-		ExhaustedUntil: acc.ExhaustedUntil,
+		ExhaustedUntil: acc.ExhaustedUntil, ClaimBlockedUntil: acc.ClaimBlockedUntil,
 		LastUsedAt:     acc.LastUsedAt, CreatedAt: acc.CreatedAt, Usage: acc.Usage,
 		HasProject: acc.Project != nil,
 	}
@@ -344,10 +345,15 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		settings := s.store.Settings()
+		real := settings.ProxyToken
 		settings.AdminPasswordHash = ""
+		// 明文 token 只在 /api/settings/token 单独回显，页面平时拿掩码。
+		settings.ProxyToken = ""
 		writeJSON(w, 200, map[string]any{
 			"settings":       settings,
 			"passwordSource": s.passwordSource(),
+			"proxyTokenMask": maskToken(real),
+			"proxyTokenSet":  real != "",
 			"server": ServerInfo{
 				Version: s.version, BaseURL: s.baseURL, Fingerprint: settings.Fingerprint,
 				QuotaSeconds: settings.QuotaIntervalSec, DataDir: s.store.dir,
@@ -398,11 +404,33 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			}
 		})
 		settings := s.store.Settings()
+		mask := maskToken(settings.ProxyToken)
 		settings.AdminPasswordHash = ""
-		writeJSON(w, 200, map[string]any{"ok": true, "settings": settings})
+		settings.ProxyToken = ""
+		writeJSON(w, 200, map[string]any{"ok": true, "settings": settings, "proxyTokenMask": mask, "proxyTokenSet": mask != ""})
 	default:
 		writeError(w, 405, "method not allowed")
 	}
+}
+
+// handleRevealToken 单独回显网关 token 明文：面板平时只显示掩码，
+// 要复制给客户端时才走这里，避免截图和日志里到处是明文。
+func (s *Server) handleRevealToken(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, 405, "method not allowed")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"token": s.store.Settings().ProxyToken})
+}
+
+func maskToken(token string) string {
+	if token == "" {
+		return ""
+	}
+	if len(token) <= 12 {
+		return strings.Repeat("•", len(token))
+	}
+	return token[:5] + "…" + token[len(token)-4:]
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
@@ -439,6 +467,19 @@ func (s *Server) dropBindingsIfAccountDead(acc *Account, authFailed bool) {
 	s.pool.InvalidateAccount(acc.ID)
 }
 
+// relayOptions 描述一次「拿号 → 转发 → 回写」的完整过程。
+// Anthropic 与 OpenAI 两个入口只在编解码上有差别，重试与降级逻辑共用一份。
+type relayOptions struct {
+	body          map[string]any // 真正发给上游的 Anthropic 请求体
+	model         string
+	stream        bool
+	sessionBody   map[string]any // 客户端原始请求体，用来提取 session key
+	clientReqBody string
+	render        func(ctx context.Context, w http.ResponseWriter, resp *fhttp.Response, start time.Time) (Usage, streamTiming, int, string)
+	writeError    func(w http.ResponseWriter, status int, message string)
+	writeUpstream func(w http.ResponseWriter, status int, body []byte)
+}
+
 func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, 405, "method not allowed")
@@ -464,9 +505,52 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	if model == "" {
 		model = "GLM-5.3-Flash"
 	}
-	clientHeaders := map[string]string{
-		"anthropic-version": r.Header.Get("anthropic-version"),
-		"anthropic-beta":    r.Header.Get("anthropic-beta"),
+	clientReqBody := ""
+	if s.store.Settings().StoreBodies {
+		if data, err := json.Marshal(body); err == nil {
+			clientReqBody = truncate(string(data), 8192)
+		}
+	}
+	s.relay(w, r, relayOptions{
+		body:          body,
+		model:         model,
+		stream:        stream,
+		sessionBody:   body,
+		clientReqBody: clientReqBody,
+		render: func(ctx context.Context, w http.ResponseWriter, resp *fhttp.Response, start time.Time) (Usage, streamTiming, int, string) {
+			return s.writeUpstream(ctx, w, resp, stream, start)
+		},
+		writeError:    writeError,
+		writeUpstream: writeUpstreamError,
+	})
+}
+// handleChatCompletions 是 OpenAI 兼容入口：请求翻成 Anthropic 再走上游，
+// 响应再翻回 chat.completion。这样 Cursor / OpenAI SDK 这类客户端也能直接用。
+func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeOpenAIError(w, 405, "method not allowed")
+		return
+	}
+	if !s.authorized(r) {
+		writeOpenAIError(w, 401, "invalid local proxy token")
+		return
+	}
+	var body map[string]any
+	dec := json.NewDecoder(io.LimitReader(r.Body, 32<<20))
+	dec.UseNumber()
+	if err := dec.Decode(&body); err != nil {
+		writeOpenAIError(w, 400, "request body is not valid JSON")
+		return
+	}
+	anthropicBody, err := openAIRequestToAnthropic(body)
+	if err != nil {
+		writeOpenAIError(w, 400, err.Error())
+		return
+	}
+	stream, _ := body["stream"].(bool)
+	model, _ := body["model"].(string)
+	if model == "" {
+		model = "GLM-5.3-Flash"
 	}
 	clientReqBody := ""
 	if s.store.Settings().StoreBodies {
@@ -474,92 +558,136 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			clientReqBody = truncate(string(data), 8192)
 		}
 	}
+	s.relay(w, r, relayOptions{
+		body:          anthropicBody,
+		model:         model,
+		stream:        stream,
+		sessionBody:   body,
+		clientReqBody: clientReqBody,
+		render: func(ctx context.Context, w http.ResponseWriter, resp *fhttp.Response, start time.Time) (Usage, streamTiming, int, string) {
+			return s.writeUpstreamOpenAI(ctx, w, resp, stream, model, start)
+		},
+		writeError:    writeOpenAIError,
+		writeUpstream: writeOpenAIUpstreamError,
+	})
+}
+
+
+func (s *Server) relay(w http.ResponseWriter, r *http.Request, opts relayOptions) {
 	start := time.Now()
-	sessionKey := extractSessionKey(r, body)
+	sessionKey := extractSessionKey(r, opts.sessionBody)
 	accounts := s.store.AccountsForRefresh()
 	maxAttempts := len(accounts) + 1
 	requestTimeout := envSeconds("ZCODE_REQUEST_TIMEOUT_SEC", 600)
+	// 429 原地重试的共享预算：一个请求最多为等频控花这么久，花完就开始换号。
+	waitBudget := envSecondsAllowZero("ZCODE_RETRY_WAIT_SEC", 20)
+	clientHeaders := map[string]string{
+		"anthropic-version": r.Header.Get("anthropic-version"),
+		"anthropic-beta":    r.Header.Get("anthropic-beta"),
+	}
 	var lastStatus int
 	var lastBody []byte
 	var lastErr error
 	tried := map[string]bool{}
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		acc, release, err := s.pool.AcquireExcludingModel(r.Context(), sessionKey, tried, model)
+		acc, release, err := s.pool.AcquireExcludingModel(r.Context(), sessionKey, tried, opts.model)
 		if err != nil {
 			if errors.Is(err, errNoAvailableAccount) {
 				if lastStatus != 0 {
 					break
 				}
-				writeError(w, 503, "no available account")
+				opts.writeError(w, 503, "no available account")
 				return
 			}
 			if r.Context().Err() != nil {
 				return
 			}
-			writeError(w, 502, err.Error())
+			opts.writeError(w, 502, err.Error())
 			return
 		}
-		tried[acc.ID] = true
 		done := false
+		verdict := upstreamVerdict{}
 		func() {
 			defer release()
 			ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
 			defer cancel()
-			resp, reqBytes, err := s.Forward(ctx, acc, body, clientHeaders)
+			resp, reqBytes, err := s.Forward(ctx, acc, opts.body, clientHeaders)
 			if err != nil {
 				lastErr = err
 				if r.Context().Err() == nil {
-					if model != "" {
-						s.store.RecordModelFailure(acc.ID, model, err.Error())
-					} else {
-						s.store.MarkExhausted(acc.ID, time.Now().Add(30*time.Second), err.Error())
-					}
+					s.store.NoteFailure(acc.ID, err.Error())
+					s.store.RecordModelFailure(acc.ID, opts.model, err.Error())
 					s.dropBindingsIfAccountDead(acc, false)
 				}
 				return
 			}
 			if resp.StatusCode == 200 {
-				usage, timing, respBytes, respPreview := s.writeUpstream(ctx, w, resp, stream, start)
-				s.recordLog(acc, model, stream, 200, true, time.Since(start), usage, timing, resp.Header.Get("x-request-id"), sessionKey, r, clientReqBody, respPreview, len(reqBytes), respBytes, "")
+				usage, timing, respBytes, respPreview := opts.render(ctx, w, resp, start)
+				s.recordLog(acc, opts.model, opts.stream, 200, true, time.Since(start), usage, timing, resp.Header.Get("x-request-id"), sessionKey, r, opts.clientReqBody, respPreview, len(reqBytes), respBytes, "")
 				s.pool.TouchSession(sessionKey)
+				s.store.ResetRiskStrikes(acc.ID)
 				done = true
 				return
 			}
 			data, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 			resp.Body.Close()
 			lastStatus = resp.StatusCode
-			lastBody = data
-			retry, cooldown, reason, _ := classifyUpstream(resp.StatusCode, data)
-			if retry {
-				authFailed := resp.StatusCode == 401 || resp.StatusCode == 403
-				switch {
-				case authFailed:
-					s.store.MarkExhausted(acc.ID, time.Now().Add(cooldown), reason)
-				case model != "":
-					s.store.RecordModelFailure(acc.ID, model, reason)
-				default:
-					s.store.MarkExhausted(acc.ID, time.Now().Add(cooldown), reason)
-				}
-				s.dropBindingsIfAccountDead(acc, authFailed)
+			verdict = classifyUpstream(resp.StatusCode, resp.Header.Get("Retry-After"), data)
+			if verdict.Retry {
+				s.applyVerdict(acc, verdict, opts.model)
 				return
 			}
-			s.recordLog(acc, model, stream, resp.StatusCode, false, time.Since(start), Usage{}, streamTiming{}, resp.Header.Get("x-request-id"), sessionKey, r, clientReqBody, truncate(string(data), 8192), len(reqBytes), len(data), reason)
-			writeUpstreamError(w, resp.StatusCode, data)
+			s.recordLog(acc, opts.model, opts.stream, resp.StatusCode, false, time.Since(start), Usage{}, streamTiming{}, resp.Header.Get("x-request-id"), sessionKey, r, opts.clientReqBody, truncate(string(data), 8192), len(reqBytes), len(data), verdict.Reason)
+			opts.writeUpstream(w, resp.StatusCode, data)
 			done = true
 		}()
 		if done || r.Context().Err() != nil {
 			return
 		}
+		if verdict.Retry && verdict.Wait > 0 && verdict.Wait <= waitBudget {
+			// 账号没坏，等一会儿打同一个号；不占换号预算。
+			waitBudget -= verdict.Wait
+			select {
+			case <-time.After(verdict.Wait):
+			case <-r.Context().Done():
+				return
+			}
+			attempt--
+			continue
+		}
+		if verdict.Retry {
+			tried[acc.ID] = true
+			continue
+		}
 	}
 	if lastStatus == 0 {
 		if lastErr != nil {
-			writeError(w, 502, lastErr.Error())
+			opts.writeError(w, 502, lastErr.Error())
 		} else {
-			writeError(w, 503, "no available account")
+			opts.writeError(w, 503, "no available account")
 		}
 		return
 	}
-	writeUpstreamError(w, lastStatus, lastBody)
+	opts.writeUpstream(w, lastStatus, lastBody)
+}
+
+// applyVerdict 把分类结论落到账号状态上：能修的修，修不了才冷却或停用。
+func (s *Server) applyVerdict(acc *Account, v upstreamVerdict, model string) {
+	switch {
+	case v.Disable:
+		s.store.DisableAccount(acc.ID, v.Reason)
+	case v.Risk:
+		strikes := s.store.BumpRiskStrikes(acc.ID)
+		s.store.MarkExhausted(acc.ID, time.Now().Add(riskCooldownFor(strikes)), v.Reason)
+	case v.Cooldown > 0:
+		s.store.MarkExhausted(acc.ID, time.Now().Add(v.Cooldown), v.Reason)
+	case v.ModelScoped && model != "":
+		s.store.RecordModelFailure(acc.ID, model, v.Reason)
+	default:
+		// 429 / 验证码这类：账号是健康的，只记原因，不冷却。
+		s.store.NoteFailure(acc.ID, v.Reason)
+	}
+	s.dropBindingsIfAccountDead(acc, v.Disable)
 }
 
 type streamTiming struct {
@@ -711,39 +839,7 @@ func (s *Server) authorized(r *http.Request) bool {
 	return auth == "Bearer "+token || apiKey == token
 }
 
-const (
-	rateLimitFreezeAfter = 3
-	rateLimitCooldown    = time.Minute
-)
-
-func classifyUpstream(status int, body []byte) (bool, time.Duration, string, bool) {
-	var parsed struct {
-		Code  int    `json:"code"`
-		Msg   string `json:"msg"`
-		Error struct {
-			Code    any    `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	_ = json.Unmarshal(body, &parsed)
-	msg := parsed.Msg
-	if msg == "" {
-		msg = parsed.Error.Message
-	}
-	if status == 429 || parsed.Code == 1113 {
-		return true, rateLimitCooldown, firstNonEmpty(msg, "额度或限流"), true
-	}
-	if status == 401 || status == 403 {
-		return true, 30 * time.Minute, firstNonEmpty(msg, "认证失败"), false
-	}
-	if status == 405 && parsed.Code == 3012 {
-		return true, time.Minute, "上游风控 3012", false
-	}
-	if status >= 500 {
-		return true, 30 * time.Second, firstNonEmpty(msg, fmt.Sprintf("上游 HTTP %d", status)), false
-	}
-	return false, 0, firstNonEmpty(msg, fmt.Sprintf("上游 HTTP %d", status)), false
-}
+const rateLimitFreezeAfter = 3
 
 func writeUpstreamError(w http.ResponseWriter, status int, body []byte) {
 	var parsed any
@@ -843,7 +939,18 @@ func truncate(s string, n int) string {
 	return s[:n] + "..."
 }
 
+// clientIP 取真实来源：cloudflared 会带 Cf-Connecting-Ip，其次是反向代理的
+// X-Forwarded-For 第一跳，最后回落 RemoteAddr。
 func clientIP(r *http.Request) string {
+	if v := strings.TrimSpace(r.Header.Get("Cf-Connecting-Ip")); v != "" {
+		return v
+	}
+	if v := r.Header.Get("X-Forwarded-For"); v != "" {
+		first, _, _ := strings.Cut(v, ",")
+		if first = strings.TrimSpace(first); first != "" {
+			return first
+		}
+	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err == nil {
 		return host

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -292,10 +293,7 @@ func (p *Pool) acquire(ctx context.Context, sessionKey string, exclude map[strin
 			}
 		}
 
-		order := make([]*Account, len(healthy))
-		copy(order, healthy)
-		rand.Shuffle(len(order), func(i, j int) { order[i], order[j] = order[j], order[i] })
-		for _, acc := range order {
+		for _, acc := range p.selectionOrder(healthy, now) {
 			slot := p.slotFor(acc)
 			// Only take a slot that is free right now; queuing is reserved for
 			// the session's own preferred account.
@@ -358,6 +356,95 @@ func (p *Pool) TouchSession(sessionKey string) {
 	p.store.db.TouchBinding(sessionKey, time.Now().Unix(), p.stickyTTL)
 }
 
+
+// poolCandidate 是加权选号中间态：账号 + 本次请求里的权重。
+type poolCandidate struct {
+	acc    *Account
+	weight float64
+}
+
+// candidateWindow 是加权抽签的短名单大小。先按权重取前 N 个再抽，
+// 避免纯随机把 7B 额度的号和快耗尽的号同等对待。
+func candidateWindow() int {
+	if n, err := strconv.Atoi(strings.TrimSpace(os.Getenv("ZCODE_POOL_TOPN"))); err == nil && n > 0 {
+		if n > 20 {
+			n = 20
+		}
+		return n
+	}
+	return 5
+}
+
+// accountWeight 越大越该被选中：余额占比是主因子，闲置时长做补偿。
+// 账号本身是否可用由调用方先过滤，这里只管「在健康账号里偏向谁」。
+func accountWeight(acc *Account, now int64) float64 {
+	balance := 0.5
+	if acc.Quota.Granted > 0 {
+		balance = float64(acc.Quota.Remaining) / float64(acc.Quota.Granted)
+		if balance < 0 {
+			balance = 0
+		}
+		if balance > 1 {
+			balance = 1
+		}
+	}
+	idleHours := 0.0
+	if acc.LastUsedAt > 0 && now > acc.LastUsedAt {
+		idleHours = float64(now-acc.LastUsedAt) / 3600
+		if idleHours > 5 {
+			idleHours = 5
+		}
+	}
+	return 1 + balance*9 + idleHours*0.4
+}
+
+// selectionOrder 给出本次请求的候选顺序：高权重短名单先按权重抽签，
+// 短名单之外的按权重降序兜底，保证每个健康账号仍然会被试到。
+func (p *Pool) selectionOrder(healthy []*Account, now int64) []*Account {
+	candidates := make([]poolCandidate, 0, len(healthy))
+	for _, acc := range healthy {
+		candidates = append(candidates, poolCandidate{acc: acc, weight: accountWeight(acc, now)})
+	}
+	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].weight > candidates[j].weight })
+
+	window := candidateWindow()
+	if window > len(candidates) {
+		window = len(candidates)
+	}
+	order := weightedShuffle(candidates[:window])
+	if window < len(candidates) {
+		order = append(order, weightedShuffle(candidates[window:])...)
+	}
+	return order
+}
+
+// weightedShuffle 按权重不放回抽样，返回「越重越可能靠前」的随机顺序。
+func weightedShuffle(list []poolCandidate) []*Account {
+	remaining := append([]poolCandidate(nil), list...)
+	out := make([]*Account, 0, len(remaining))
+	for len(remaining) > 0 {
+		total := 0.0
+		for _, c := range remaining {
+			total += c.weight
+		}
+		idx := 0
+		if total > 0 {
+			r := rand.Float64() * total
+			for i, c := range remaining {
+				r -= c.weight
+				if r <= 0 {
+					idx = i
+					break
+				}
+			}
+		} else {
+			idx = rand.IntN(len(remaining))
+		}
+		out = append(out, remaining[idx].acc)
+		remaining = append(remaining[:idx], remaining[idx+1:]...)
+	}
+	return out
+}
 var errNoAvailableAccount = &poolError{"no available account"}
 
 type poolError struct{ message string }

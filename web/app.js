@@ -728,7 +728,11 @@ async function loadSettings() {
   try {
     const data = await api('/api/settings');
     state.settings = data.settings;
-    $('setting-token').value = data.settings.proxyToken || '';
+    state.tokenSet = !!data.proxyTokenSet;
+    state.tokenMask = data.proxyTokenMask || '';
+    state.clearToken = false;
+    $('setting-token').value = '';
+    $('setting-token').placeholder = state.tokenSet ? `${state.tokenMask}（留空＝不修改）` : '留空则本机免鉴权';
     $('setting-bodies').checked = !!data.settings.storeBodies;
     $('setting-fingerprint').checked = !!data.settings.fingerprint;
     $('setting-prompt-mode').value = data.settings.promptMode || 'replace';
@@ -844,8 +848,8 @@ async function saveProxySettings() {
 
 async function saveSettings() {
   try {
+    const typedToken = $('setting-token').value.trim();
     const body = {
-      proxyToken: $('setting-token').value.trim(),
       storeBodies: $('setting-bodies').checked,
       fingerprint: $('setting-fingerprint').checked,
       promptMode: $('setting-prompt-mode').value,
@@ -853,6 +857,9 @@ async function saveSettings() {
       quotaIntervalSec: Number($('setting-quota').value) || 30,
       defaultConcurrency: Number($('setting-concurrency').value) || 1,
     };
+    // 明文 token 不回显：只有用户真的输入了、或者点了「清除」才提交这个字段。
+    if (typedToken) body.proxyToken = typedToken;
+    else if (state.clearToken) body.proxyToken = '';
     await api('/api/settings', { method: 'PATCH', body: JSON.stringify(body) });
     toast('设置已保存');
     await loadSettings();
@@ -1094,6 +1101,28 @@ $('add-account-empty').addEventListener('click', openAddModal);
 $('import-local').addEventListener('click', importLocalAccount);
 $('generate-url').addEventListener('click', generateAuthUrl);
 $('copy-auth-url').addEventListener('click', () => copyText($('auth-url').value));
+$('copy-token').addEventListener('click', async () => {
+  const typed = $('setting-token').value.trim();
+  if (typed) {
+    copyText(typed);
+    return;
+  }
+  try {
+    const data = await api('/api/settings/token');
+    if (!data.token) {
+      toast('当前没有设置 token（本机免鉴权）');
+      return;
+    }
+    copyText(data.token);
+  } catch (error) {
+    toast(error.message, true);
+  }
+});
+$('clear-token').addEventListener('click', () => {
+  $('setting-token').value = '';
+  state.clearToken = true;
+  toast('已标记清除，点「保存设置」生效');
+});
 $('open-auth-url').addEventListener('click', () => {
   const url = $('auth-url').value;
   if (url) window.open(url, '_blank', 'noopener');
@@ -1102,8 +1131,6 @@ $('submit-callback').addEventListener('click', submitCallback);
 $('save-settings').addEventListener('click', saveSettings);
 $('activity-captcha-fetch').addEventListener('click', fetchCaptchaParam);
 $('generate-token').addEventListener('click', generateProxyToken);
-$('copy-token').addEventListener('click', () => copyText($('setting-token').value));
-$('change-password').addEventListener('click', changePassword);
 $('copy-guide').addEventListener('click', () => copyText(state.guide || ''));
 $('refresh-logs').addEventListener('click', loadLogs);
 document.addEventListener('change', (event) => {
