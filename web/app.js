@@ -345,9 +345,11 @@ function accountRow(account, index) {
       <div class="${rateClass(rate)}">${rate.toFixed(1)}%</div>
     </td>
     <td>
-      <select class="input compact" data-concurrency="${esc(account.id)}">
-        ${[1,2,3,4,5].map((v) => `<option value="${v}" ${Number(account.concurrency || 1) === v ? 'selected' : ''}>${v}</option>`).join('')}
+    <td>
+      <select class="input compact" data-concurrency="${esc(account.id)}" title="生效并发：${n(account.concurrencyEffective || account.concurrency || 1)}">
+        ${[0,1,2,3,4,5].map((v) => `<option value="${v}" ${Number(account.concurrency || 0) === v ? 'selected' : ''}>${v === 0 ? '跟随' : v}</option>`).join('')}
       </select>
+    </td>
     </td>
     <td class="muted-cell">${relative(today.lastUsed || account.lastUsedAt)}</td>
     <td class="actions">
@@ -584,7 +586,7 @@ async function setConcurrency(id, value) {
       body: JSON.stringify({ concurrency: value }),
     });
     await loadAccounts();
-    toast(`并发已设为 ${value}`);
+    toast(value === 0 ? '并发已设为跟随全局' : `并发已设为 ${value}`);
   } catch (error) {
     toast(error.message, true);
   }
@@ -735,6 +737,10 @@ async function loadSettings() {
     $('setting-base').textContent = data.server.baseUrl;
     $('setting-version').textContent = `v${data.server.version}`;
     $('setting-datadir').textContent = data.server.dataDir;
+    if ($('setting-concurrency')) $('setting-concurrency').value = String(data.settings.defaultConcurrency || 1);
+    const sourceLabels = { env: '来自环境变量', panel: '面板保存的密码', generated: '本次启动随机生成（已写入面板）', none: '未设置' };
+    if ($('password-source')) $('password-source').textContent = sourceLabels[data.passwordSource] || '未知来源';
+    renderGuide(data.server.baseUrl, data.settings.proxyToken || '');
   } catch (error) {
     toast(error.message, true);
   }
@@ -845,6 +851,7 @@ async function saveSettings() {
       promptMode: $('setting-prompt-mode').value,
       uaProfile: $('setting-ua').value,
       quotaIntervalSec: Number($('setting-quota').value) || 30,
+      defaultConcurrency: Number($('setting-concurrency').value) || 1,
     };
     await api('/api/settings', { method: 'PATCH', body: JSON.stringify(body) });
     toast('设置已保存');
@@ -852,6 +859,52 @@ async function saveSettings() {
   } catch (error) {
     toast(error.message, true);
   }
+}
+
+async function changePassword() {
+  const current = $('password-current').value;
+  const next = $('password-next').value;
+  const confirm = $('password-confirm').value;
+  if (!current || !next) {
+    toast('请填写当前密码和新密码', true);
+    return;
+  }
+  if (next.length < 8) {
+    toast('新密码至少 8 位', true);
+    return;
+  }
+  if (next !== confirm) {
+    toast('两次输入的新密码不一致', true);
+    return;
+  }
+  try {
+    await api('/api/admin/password', { method: 'POST', body: JSON.stringify({ current, next }) });
+    $('password-current').value = '';
+    $('password-next').value = '';
+    $('password-confirm').value = '';
+    toast('面板密码已更新');
+    await loadSettings();
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+// renderGuide 把当前 Base URL 与 Token 填进接入示例，避免用户对着占位符猜。
+function renderGuide(base, token) {
+  const auth = token || '<本机免鉴权>';
+  const snippets = `# curl
+curl -s ${base}/v1/messages \\
+  -H "Authorization: Bearer ${auth}" \\
+  -H "content-type: application/json" \\
+  -d '{"model":"GLM-5.3","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}'
+
+# Claude Code / ZCode 客户端
+export ANTHROPIC_BASE_URL=${base}
+export ANTHROPIC_AUTH_TOKEN=${auth}
+export ANTHROPIC_MODEL=GLM-5.3`;
+  if ($('guide-base')) $('guide-base').textContent = base;
+  if ($('guide-snippets')) $('guide-snippets').textContent = snippets;
+  state.guide = snippets;
 }
 
 function openAddModal() {
@@ -1050,6 +1103,8 @@ $('save-settings').addEventListener('click', saveSettings);
 $('activity-captcha-fetch').addEventListener('click', fetchCaptchaParam);
 $('generate-token').addEventListener('click', generateProxyToken);
 $('copy-token').addEventListener('click', () => copyText($('setting-token').value));
+$('change-password').addEventListener('click', changePassword);
+$('copy-guide').addEventListener('click', () => copyText(state.guide || ''));
 $('refresh-logs').addEventListener('click', loadLogs);
 document.addEventListener('change', (event) => {
   const concurrency = event.target.closest('[data-concurrency]');

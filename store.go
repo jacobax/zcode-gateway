@@ -49,7 +49,7 @@ func NewStore(dir string) (*Store, error) {
 	}
 	s := &Store{
 		dir:      dir,
-		settings: Settings{Fingerprint: true, StoreBodies: true, QuotaIntervalSec: 30, PromptMode: "append", UAProfile: "zcode"},
+		settings: Settings{Fingerprint: true, StoreBodies: true, QuotaIntervalSec: 30, DefaultConcurrency: 1, PromptMode: "append", UAProfile: "zcode"},
 	}
 	if err := s.loadMasterKey(); err != nil {
 		return nil, err
@@ -200,6 +200,9 @@ func (s *Store) load() error {
 	}
 	if file.Settings.QuotaIntervalSec <= 0 {
 		file.Settings.QuotaIntervalSec = 30
+	}
+	if file.Settings.DefaultConcurrency <= 0 {
+		file.Settings.DefaultConcurrency = 1
 	}
 	if file.Settings.PromptMode == "" {
 		file.Settings.PromptMode = "append"
@@ -511,6 +514,25 @@ func (s *Store) Settings() Settings {
 	return s.settings
 }
 
+// effectiveConcurrencyLocked resolves the per-account limit while s.mu is held.
+func (s *Store) effectiveConcurrencyLocked(acc *Account) int {
+	if acc != nil && acc.Concurrency > 0 {
+		return clampConcurrency(acc.Concurrency)
+	}
+	if s.settings.DefaultConcurrency > 0 {
+		return clampConcurrency(s.settings.DefaultConcurrency)
+	}
+	return 1
+}
+
+// EffectiveConcurrency is the limit actually applied to an account: its own
+// setting when present, otherwise the global default.
+func (s *Store) EffectiveConcurrency(acc *Account) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.effectiveConcurrencyLocked(acc)
+}
+
 func (s *Store) UpdateSettings(fn func(*Settings)) {
 	s.mu.Lock()
 	fn(&s.settings)
@@ -549,28 +571,28 @@ func (s *Store) Summaries() []*AccountSummary {
 			lastUsed = stats.LastUsed
 		}
 		out = append(out, &AccountSummary{
-			ID:             acc.ID,
-			Label:          acc.Label,
-			Provider:       acc.Provider,
-			Mode:           acc.Mode,
-			Priority:       acc.Priority,
-			Enabled:        acc.Enabled,
-			Status:         status,
-			Concurrency:    clampConcurrency(acc.Concurrency),
-			ModelStates:    s.ModelStatesFor(acc.ID),
-			User:           acc.User,
-			Quota:          acc.Quota,
-			LastError:      acc.LastError,
-			ExhaustedUntil: acc.ExhaustedUntil,
-			LastUsedAt:     lastUsed,
-			CreatedAt:      acc.CreatedAt,
-			Usage:          acc.Usage,
-			Today:          *stats,
-			HasProject:     acc.Project != nil,
-			Platform:       platform,
-			OSVersion:      osVersion,
-			Screen:         screen,
-			DeviceMid:      deviceMid,
+			ID:                   acc.ID,
+			Label:                acc.Label,
+			Provider:             acc.Provider,
+			Mode:                 acc.Mode,
+			Priority:             acc.Priority,
+			Enabled:              acc.Enabled,
+			Status:               status,
+			Concurrency:          normalizeConcurrency(acc.Concurrency),
+			ModelStates:          s.ModelStatesFor(acc.ID),
+			User:                 acc.User,
+			Quota:                acc.Quota,
+			LastError:            acc.LastError,
+			ExhaustedUntil:       acc.ExhaustedUntil,
+			LastUsedAt:           lastUsed,
+			CreatedAt:            acc.CreatedAt,
+			Usage:                acc.Usage,
+			Today:                *stats,
+			ConcurrencyEffective: s.effectiveConcurrencyLocked(acc),
+			Platform:             platform,
+			OSVersion:            osVersion,
+			Screen:               screen,
+			DeviceMid:            deviceMid,
 		})
 	}
 	return out

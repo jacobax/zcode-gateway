@@ -397,6 +397,14 @@ func (d *DB) DeleteAdminSession(token string) {
 	_, _ = d.sql.Exec(`DELETE FROM admin_sessions WHERE token = ?`, token)
 }
 
+// DeleteAdminSessionsExcept drops every panel session but the caller's, so a
+// password change kicks out anyone else who was already logged in.
+func (d *DB) DeleteAdminSessionsExcept(token string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, _ = d.sql.Exec(`DELETE FROM admin_sessions WHERE token <> ?`, token)
+}
+
 func (d *DB) PruneAdminSessions(now int64) {
 	d.mu.Lock()
 	defer d.mu.Unlock()

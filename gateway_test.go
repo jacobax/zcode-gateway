@@ -226,6 +226,41 @@ func TestPoolHonorsPerAccountConcurrency(t *testing.T) {
 	rel3()
 }
 
+func TestGlobalDefaultConcurrencyWithAccountOverride(t *testing.T) {
+	store := newPoolTestStore(t)
+	store.UpdateSettings(func(st *Settings) { st.DefaultConcurrency = 2 })
+	pool := NewPool(store)
+	excludeA2 := map[string]bool{"a2": true}
+
+	first, rel1, err := pool.AcquireExcluding(context.Background(), "", excludeA2)
+	if err != nil || first.ID != "a1" {
+		t.Fatalf("first acquire: %v %#v", err, first)
+	}
+	_, rel2, err := pool.AcquireExcluding(context.Background(), "", excludeA2)
+	if err != nil {
+		t.Fatalf("second acquire should inherit the global default of 2: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	if _, _, err := pool.AcquireExcluding(ctx, "", excludeA2); err == nil {
+		t.Fatal("third acquire should block while the global default is 2")
+	}
+	rel1()
+	rel2()
+
+	store.UpdateAccountMemory("a1", func(a *Account) { a.Concurrency = 1 })
+	_, release, err := pool.AcquireExcluding(context.Background(), "", excludeA2)
+	if err != nil {
+		t.Fatalf("acquire after override: %v", err)
+	}
+	defer release()
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel2()
+	if _, _, err := pool.AcquireExcluding(ctx2, "", excludeA2); err == nil {
+		t.Fatal("an explicit account concurrency of 1 should win over the global default")
+	}
+}
+
 func TestRateLimitFreezesAfterThreeConsecutiveFailures(t *testing.T) {
 	dir, err := os.MkdirTemp("", "zcg-rate-test-")
 	if err != nil {

@@ -170,15 +170,19 @@ type LogEntry struct {
 }
 
 type Settings struct {
-	ProxyToken        string `json:"proxyToken"`
-	Fingerprint       bool   `json:"fingerprint"`
-	FingerprintSet    bool   `json:"fingerprintSet,omitempty"`
-	PromptMode        string `json:"promptMode"`
-	UAProfile         string `json:"uaProfile"`
-	StoreBodies       bool   `json:"storeBodies"`
-	QuotaIntervalSec  int    `json:"quotaIntervalSec"`
-	ActiveAccountID   string `json:"activeAccountId"`
-	AdminPasswordHash string `json:"adminPasswordHash,omitempty"`
+	ProxyToken         string `json:"proxyToken"`
+	Fingerprint        bool   `json:"fingerprint"`
+	FingerprintSet     bool   `json:"fingerprintSet,omitempty"`
+	PromptMode         string `json:"promptMode"`
+	UAProfile          string `json:"uaProfile"`
+	StoreBodies        bool   `json:"storeBodies"`
+	QuotaIntervalSec   int    `json:"quotaIntervalSec"`
+	DefaultConcurrency int    `json:"defaultConcurrency"` // 全局默认单账号并发；账号自己设了就覆盖
+	ActiveAccountID    string `json:"activeAccountId"`
+	AdminPasswordHash  string `json:"adminPasswordHash,omitempty"`
+	// AdminPasswordManual 表示密码是在面板里设的：只有这种情况才压过环境变量。
+	// 首次启动自动生成的 hash 不带这个标记，否则老部署会被它顶掉 env 密码。
+	AdminPasswordManual bool `json:"adminPasswordManual,omitempty"`
 }
 
 type Overview struct {
@@ -221,26 +225,27 @@ type ModelState struct {
 }
 
 type AccountSummary struct {
-	ID             string       `json:"id"`
-	Label          string       `json:"label"`
-	Provider       string       `json:"provider"`
-	Mode           string       `json:"mode"`
-	Priority       int          `json:"priority"`
-	Enabled        bool         `json:"enabled"`
-	Status         string       `json:"status"`
-	Concurrency    int          `json:"concurrency"`
-	ModelStates    []ModelState `json:"modelStates,omitempty"`
-	User           UserInfo     `json:"user"`
-	Quota          Quota        `json:"quota"`
-	LastError      string       `json:"lastError,omitempty"`
-	ExhaustedUntil int64        `json:"exhaustedUntil,omitempty"`
-	LastUsedAt     int64        `json:"lastUsedAt,omitempty"`
-	CreatedAt      int64        `json:"createdAt"`
-	Usage          UsageTotals  `json:"usage"`
-	Today          TodayStats   `json:"today"`
-	HasProject     bool         `json:"hasProject"`
-	Platform       string       `json:"platform,omitempty"`
-	OSVersion      string       `json:"osVersion,omitempty"`
-	Screen         string       `json:"screen,omitempty"`
-	DeviceMid      string       `json:"deviceMid,omitempty"`
+	ID                   string       `json:"id"`
+	Label                string       `json:"label"`
+	Provider             string       `json:"provider"`
+	Mode                 string       `json:"mode"`
+	Priority             int          `json:"priority"`
+	Enabled              bool         `json:"enabled"`
+	Status               string       `json:"status"`
+	Concurrency          int          `json:"concurrency"`          // 0 = 跟随全局默认
+	ConcurrencyEffective int          `json:"concurrencyEffective"` // 实际生效值
+	ModelStates          []ModelState `json:"modelStates,omitempty"`
+	User                 UserInfo     `json:"user"`
+	Quota                Quota        `json:"quota"`
+	LastError            string       `json:"lastError,omitempty"`
+	ExhaustedUntil       int64        `json:"exhaustedUntil,omitempty"`
+	LastUsedAt           int64        `json:"lastUsedAt,omitempty"`
+	CreatedAt            int64        `json:"createdAt"`
+	Usage                UsageTotals  `json:"usage"`
+	Today                TodayStats   `json:"today"`
+	HasProject           bool         `json:"hasProject"`
+	Platform             string       `json:"platform,omitempty"`
+	OSVersion            string       `json:"osVersion,omitempty"`
+	Screen               string       `json:"screen,omitempty"`
+	DeviceMid            string       `json:"deviceMid,omitempty"`
 }

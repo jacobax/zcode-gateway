@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ZCode Gateway</title>
-<link rel="stylesheet" href="/style.css?v=7">
+<link rel="stylesheet" href="/style.css?v=8">
 <script>
   // 夜间模式：在首屏渲染前决定主题，避免闪白
   try {
@@ -132,6 +132,14 @@
           <button class="btn primary" id="add-account">添加账号</button>
         </div>
       </div>
+      <details class="hint-box">
+        <summary>怎么添加账号？两种方式怎么选</summary>
+        <div class="hint-body">
+          <p><strong>浏览器登录授权</strong>（推荐）：点「添加账号」，复制回调地址，在浏览器里登录 z.ai，再把跳转后的地址粘回来。凭据由网关自己换，不用手工抓 cookie，新号走这条。</p>
+          <p><strong>导入本机账号</strong>：直接读本机 ZCode 桌面端的登录态（<code>~/.zcode/v2/credentials.json</code>）。只适合「把自己正在用的号搬进来」；没装桌面端或没登录过就会提示没凭据。首次启动账号表为空时也会自动导入一次，日志里有记录。</p>
+          <p>加完记得：没有套餐的号先<strong>禁用</strong>，否则会被选号选中并把上游的 <code>1005 exceed quota limit</code> 原样透传给客户端。额度可以交给 <code>contrib/claimer</code> 自动领取。</p>
+        </div>
+      </details>
       <div class="card">
         <div class="table-wrap">
           <table class="table accounts-table" id="accounts-table">
@@ -214,6 +222,37 @@
           </label>
         </div>
         <div class="card">
+          <div class="card-head">
+            <div><div class="card-kicker">安全</div><h2>面板密码</h2></div>
+            <span class="muted" id="password-source">-</span>
+          </div>
+          <label class="field">
+            <span>当前密码</span>
+            <input class="input" id="password-current" type="password" autocomplete="current-password">
+          </label>
+          <label class="field">
+            <span>新密码（至少 8 位）</span>
+            <input class="input" id="password-next" type="password" autocomplete="new-password">
+          </label>
+          <label class="field">
+            <span>确认新密码</span>
+            <input class="input" id="password-confirm" type="password" autocomplete="new-password">
+          </label>
+          <button class="btn primary" id="change-password">修改面板密码</button>
+          <small>改完其它浏览器上的登录会立即失效。<strong>面板里设过的密码优先于环境变量</strong> <code>ZCODE_ADMIN_PASSWORD</code>；忘了密码就把 <code>data/accounts.json</code> 里的 <code>adminPasswordHash</code> 和 <code>adminPasswordManual</code> 一起删掉再重启。</small>
+        </div>
+        <div class="card">
+          <div class="card-head">
+            <div><div class="card-kicker">接入</div><h2>客户端接入指引</h2></div>
+            <button class="btn ghost" id="copy-guide">复制全部</button>
+          </div>
+          <div class="info-row"><span>API Base</span><code id="guide-base">-</code></div>
+          <div class="info-row"><span>模型</span><code>GLM-5.3 / GLM-5.3-Flash</code></div>
+          <div class="info-row"><span>鉴权</span><code>Authorization: Bearer &lt;token&gt;</code> 或 <code>x-api-key</code></div>
+          <pre class="guide-pre" id="guide-snippets">-</pre>
+          <small>Token 就是上面「本地访问」里那个，留空表示本机免鉴权（仅回环地址安全）。</small>
+        </div>
+        <div class="card">
           <div class="card-head"><div><div class="card-kicker">上游</div><h2>指纹与额度</h2></div></div>
           <label class="field switch-field">
             <span><strong>Start Plan system 指纹</strong><small>关闭后上游会返回 3012；仅用于排查。</small></span>
@@ -240,6 +279,13 @@
             <span>额度刷新间隔（秒）</span>
             <input class="input" id="setting-quota" type="number" min="10" max="300" step="5">
             <small>后台定时拉取套餐额度，页面每 30 秒读取一次。</small>
+          </label>
+          <label class="field">
+            <span>全局默认并发</span>
+            <select class="input" id="setting-concurrency">
+              <option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option>
+            </select>
+            <small>每个账号同时在途的请求数。账号自己在「账号管理」里设了并发，就以账号的为准。</small>
           </label>
           <div class="info-row"><span>API Base</span><code id="setting-base">-</code></div>
           <div class="info-row"><span>版本</span><code id="setting-version">-</code></div>
@@ -373,6 +419,6 @@
 </div>
 
 <div class="toast" id="toast"></div>
-<script src="/app.js?v=7"></script>
+<script src="/app.js?v=8"></script>
 </body>
 </html>

@@ -73,6 +73,18 @@ PUT >94:
    面板里会直接出现本机账号——这是上游行为，不是发布包里带了数据。日志会打一行
    `已从桌面端导入 N 个账号（来源 …）`；没有凭据时打 `未发现桌面端凭据 …，跳过自动导入`。
 
+## 面板密码与并发
+
+- **面板密码**：设置页「面板密码」可以直接改，写入 `data/accounts.json` 的 `adminPasswordHash`（bcrypt）。
+  一旦在面板里设过，环境变量 `ZCODE_ADMIN_PASSWORD` 就只是「还没设过时」的初始值，启动日志会打
+- **面板密码**：设置页「面板密码」可以直接改，写入 `data/accounts.json` 的 `adminPasswordHash`（bcrypt）
+  \+ `adminPasswordManual: true`。**只有带 `manual` 标记的 hash 才压过环境变量**；首次启动自动生成的
+  hash 不带这个标记，否则老部署会被它顶掉 `ZCODE_ADMIN_PASSWORD` 而锁在门外（v1.3.1 踩过）。
+  改密码会踢掉其它浏览器上的登录。忘了密码：把 `adminPasswordHash` 和 `adminPasswordManual` 一起删掉
+  再重启，会回落到环境变量；两者都没有则随机生成并打到启动日志。
+  设了并发就以账号为准（下拉选「跟随」= 用全局值）。账号表「并发」列鼠标悬停能看到实际生效值。
+  上游对单账号并发有上限，超过 5 没有意义。
+
 ## 已知坑（都踩过）
 
 1. **`billing/current` 已不可信**。2026-10 起它对所有账号返回 `plans: []`，真实额度只在

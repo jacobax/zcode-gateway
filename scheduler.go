@@ -276,10 +276,10 @@ func (p *Pool) acquire(ctx context.Context, sessionKey string, exclude map[strin
 				var err error
 				if budget := time.Until(waitDeadline); budget > 0 {
 					waitCtx, cancel := context.WithTimeout(ctx, budget)
-					release, err = p.holdSlot(waitCtx, slot, acc.Concurrency)
+					release, err = p.holdSlot(waitCtx, slot, p.store.EffectiveConcurrency(acc))
 					cancel()
 				} else {
-					release, err = p.tryHoldSlot(slot, acc.Concurrency)
+					release, err = p.tryHoldSlot(slot, p.store.EffectiveConcurrency(acc))
 				}
 				if err == nil {
 					p.store.SetActive(acc.ID)
@@ -299,7 +299,7 @@ func (p *Pool) acquire(ctx context.Context, sessionKey string, exclude map[strin
 			slot := p.slotFor(acc)
 			// Only take a slot that is free right now; queuing is reserved for
 			// the session's own preferred account.
-			release, err := p.tryHoldSlot(slot, acc.Concurrency)
+			release, err := p.tryHoldSlot(slot, p.store.EffectiveConcurrency(acc))
 			if err != nil {
 				continue
 			}

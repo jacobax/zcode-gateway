@@ -1,8 +1,8 @@
 package main
 
 import (
-	"bytes"
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	fhttp "github.com/bogdanfinn/fhttp"
@@ -31,6 +32,7 @@ type Server struct {
 	adminPass      string
 	adminHash      string
 	adminGenerated bool
+	adminMu        sync.RWMutex
 }
 
 func NewServer(store *Store, upstream *Upstream, baseURL string) *Server {
@@ -63,8 +65,8 @@ func (s *Server) summary(acc *Account) *AccountSummary {
 	summary := &AccountSummary{
 		ID: acc.ID, Label: acc.Label, Provider: acc.Provider, Mode: acc.Mode,
 		Priority: acc.Priority, Enabled: acc.Enabled, Status: status,
-		Concurrency: clampConcurrency(acc.Concurrency),
-		User:        acc.User, Quota: acc.Quota, LastError: acc.LastError,
+		Concurrency: normalizeConcurrency(acc.Concurrency), ConcurrencyEffective: s.store.EffectiveConcurrency(acc),
+		User: acc.User, Quota: acc.Quota, LastError: acc.LastError,
 		ExhaustedUntil: acc.ExhaustedUntil,
 		LastUsedAt:     acc.LastUsedAt, CreatedAt: acc.CreatedAt, Usage: acc.Usage,
 		HasProject: acc.Project != nil,
@@ -227,7 +229,7 @@ func (s *Server) handleAccountByID(w http.ResponseWriter, r *http.Request) {
 				a.Enabled = *body.Enabled
 			}
 			if body.Concurrency != nil {
-				a.Concurrency = clampConcurrency(*body.Concurrency)
+				a.Concurrency = normalizeConcurrency(*body.Concurrency)
 			}
 		}) {
 			writeError(w, 404, "account not found")
@@ -343,18 +345,23 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		settings := s.store.Settings()
 		settings.AdminPasswordHash = ""
-		writeJSON(w, 200, map[string]any{"settings": settings, "server": ServerInfo{
-			Version: s.version, BaseURL: s.baseURL, Fingerprint: settings.Fingerprint,
-			QuotaSeconds: settings.QuotaIntervalSec, DataDir: s.store.dir,
-		}})
+		writeJSON(w, 200, map[string]any{
+			"settings":       settings,
+			"passwordSource": s.passwordSource(),
+			"server": ServerInfo{
+				Version: s.version, BaseURL: s.baseURL, Fingerprint: settings.Fingerprint,
+				QuotaSeconds: settings.QuotaIntervalSec, DataDir: s.store.dir,
+			},
+		})
 	case http.MethodPatch:
 		var body struct {
-			ProxyToken       *string `json:"proxyToken"`
-			Fingerprint      *bool   `json:"fingerprint"`
-			StoreBodies      *bool   `json:"storeBodies"`
-			QuotaIntervalSec *int    `json:"quotaIntervalSec"`
-			PromptMode       *string `json:"promptMode"`
-			UAProfile        *string `json:"uaProfile"`
+			ProxyToken         *string `json:"proxyToken"`
+			Fingerprint        *bool   `json:"fingerprint"`
+			StoreBodies        *bool   `json:"storeBodies"`
+			QuotaIntervalSec   *int    `json:"quotaIntervalSec"`
+			DefaultConcurrency *int    `json:"defaultConcurrency"`
+			PromptMode         *string `json:"promptMode"`
+			UAProfile          *string `json:"uaProfile"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			writeError(w, 400, "invalid json")
@@ -373,6 +380,9 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			}
 			if body.QuotaIntervalSec != nil && *body.QuotaIntervalSec >= 10 {
 				st.QuotaIntervalSec = *body.QuotaIntervalSec
+			}
+			if body.DefaultConcurrency != nil {
+				st.DefaultConcurrency = clampConcurrency(*body.DefaultConcurrency)
 			}
 			if body.PromptMode != nil {
 				switch *body.PromptMode {

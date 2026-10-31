@@ -48,7 +48,7 @@ platform=excluded.platform, arch=excluded.arch, os_version=excluded.os_version,
 language=excluded.language, timezone=excluded.timezone, screen=excluded.screen,
 device_mid=excluded.device_mid, concurrency=excluded.concurrency,
 last_activation_date=excluded.last_activation_date, updated_at=excluded.updated_at`,
-		accountID, p.Platform, p.Arch, p.OSVersion, p.Language, p.Timezone, p.Screen, p.DeviceMid, clampConcurrency(concurrency), activation, now, now)
+		accountID, p.Platform, p.Arch, p.OSVersion, p.Language, p.Timezone, p.Screen, p.DeviceMid, normalizeConcurrency(concurrency), activation, now, now)
 	return err
 }
 
@@ -219,9 +219,6 @@ func (s *Store) EnsureProfile(acc *Account) *DeviceProfile {
 		return &p
 	}
 	if p := acc.Profile; p != nil && p.Platform != "" && p.Arch != "" && p.OSVersion != "" && p.DeviceMid != "" {
-		if acc.Concurrency == 0 {
-			acc.Concurrency = 1
-		}
 		return p
 	}
 	if row, err := s.loadProfile(acc.ID); err == nil && row.Found {
@@ -232,7 +229,7 @@ func (s *Store) EnsureProfile(acc *Account) *DeviceProfile {
 		}
 		acc.Profile = &p
 		acc.DeviceMid = p.DeviceMid
-		acc.Concurrency = clampConcurrency(row.Concurrency)
+		acc.Concurrency = normalizeConcurrency(row.Concurrency)
 		acc.LastActivationDate = row.LastActivationDate
 		return &p
 	}
@@ -240,8 +237,8 @@ func (s *Store) EnsureProfile(acc *Account) *DeviceProfile {
 	p.DeviceMid = s.uniqueDeviceMid()
 	acc.Profile = &p
 	acc.DeviceMid = p.DeviceMid
-	acc.Concurrency = 1
-	_ = s.saveProfile(acc.ID, p, 1, "")
+	acc.Concurrency = 0
+	_ = s.saveProfile(acc.ID, p, 0, "")
 	return &p
 }
 
@@ -279,7 +276,7 @@ func (s *Store) ProfileOf(acc *Account) DeviceProfile {
 }
 
 func (s *Store) SetConcurrency(accountID string, n int) bool {
-	n = clampConcurrency(n)
+	n = normalizeConcurrency(n)
 	ok := s.UpdateAccountMemory(accountID, func(a *Account) {
 		a.Concurrency = n
 		if a.Profile != nil {
@@ -373,6 +370,13 @@ func (s *Store) attachProfiles() {
 	}
 }
 
-func normalizeConcurrency(n int) int { return clampConcurrency(n) }
+// normalizeConcurrency keeps 0 as "inherit the global default"; any other value
+// is clamped to the per-account range.
+func normalizeConcurrency(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	return clampConcurrency(n)
+}
 
 var _ = strings.TrimSpace

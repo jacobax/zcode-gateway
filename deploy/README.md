@@ -83,4 +83,6 @@ systemctl daemon-reload && systemctl enable --now zcode-claimer.timer
 |---|---|---|
 | `ZCODE_GATEWAY_ADDR` | `127.0.0.1:3000` | 只监听回环，公网通过 cloudflared / 反向代理进来 |
 | `ZCODE_GATEWAY_DATA` | `/opt/zcode-gateway/data` | 账号、master.key、SQLite |
-| `ZCODE_ADMIN_PASSWORD` | 自定 | 面板登录密码；不设则首次启动随机生成并打到日志 |
+| `ZCODE_ADMIN_PASSWORD` | 自定 | 面板登录密码的**初始值**；在面板里改过密码后以面板为准（带 `adminPasswordManual` 标记），不设则首次启动随机生成并打到日志 |
+
+面板密码、全局默认并发都在「设置」页里改，不需要动单元文件。
