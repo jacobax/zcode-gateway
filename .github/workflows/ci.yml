@@ -35,4 +35,6 @@ jobs:
           set -euo pipefail
           # 面板资源靠 ?v=N 绕过 CDN 缓存，改 web/ 必须 bump，这里做个提醒式校验
           node --check web/app.js
+      - name: 扫描凭据与私人信息
+        run: bash scripts/scan-secrets.sh
           node --check web/login.js

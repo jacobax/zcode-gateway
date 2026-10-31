@@ -44,3 +44,6 @@ contrib/claimer/solver/*.html
 __pycache__/
 *.pyc
 
+
+# 本地私人词条（账号昵称等），供 scripts/scan-secrets.sh 使用，永不提交
+.private-terms
