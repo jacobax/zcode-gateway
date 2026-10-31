@@ -52,7 +52,7 @@ LOG_PATH = os.environ.get("RELAY_LOG", "/var/log/zcode-relay.log")
 CHECK_TARGET = os.environ.get("RELAY_CHECK_TARGET", "zcode.z.ai:443")
 CONNECT_TIMEOUT = float(os.environ.get("RELAY_CONNECT_TIMEOUT", "10"))
 
-DEFAULT_SETTINGS = {"health_sec": 600, "delete_after": 3}
+DEFAULT_SETTINGS = {"health_sec": 600, "delete_after": 3, "check_concurrency": 8}
 
 ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 ssl_ctx.check_hostname = False
@@ -127,6 +127,7 @@ def load_settings():
         pass
     settings["health_sec"] = max(30, min(86400, int(settings.get("health_sec", 600))))
     settings["delete_after"] = max(0, min(100, int(settings.get("delete_after", 3))))
+    settings["check_concurrency"] = max(1, min(64, int(settings.get("check_concurrency", 8))))
 
 
 def save_settings():
@@ -202,7 +203,7 @@ async def socks5_handshake(reader, writer, host, port, user, password):
 
 
 async def open_tunnel(entry, target_host, target_port):
-    """连上游代理并打通到 target，成功返回 (reader, writer)。"""
+    """连上游代理并打通到 target。成功 (reader, writer, "")，失败 (None, None, 原因)。"""
     host, port = entry["host"], entry["port"]
     use_tls = entry["scheme"] == "https"
     try:
@@ -210,8 +211,16 @@ async def open_tunnel(entry, target_host, target_port):
             asyncio.open_connection(host, port, ssl=ssl_ctx if use_tls else None,
                                     server_hostname=host if use_tls else None),
             timeout=CONNECT_TIMEOUT)
-    except Exception:
-        return None
+    except asyncio.TimeoutError:
+        return None, None, "连接超时"
+    except ssl.SSLError:
+        return None, None, "TLS 握手失败"
+    except ConnectionRefusedError:
+        return None, None, "连接被拒"
+    except OSError as e:
+        return None, None, f"连接失败（{e.strerror or e.__class__.__name__}）"
+    except Exception as e:
+        return None, None, f"连接失败（{e.__class__.__name__}）"
     try:
         if entry["scheme"] == "socks5":
             ok = await asyncio.wait_for(
@@ -220,8 +229,8 @@ async def open_tunnel(entry, target_host, target_port):
                 timeout=CONNECT_TIMEOUT)
             if not ok:
                 writer.close()
-                return None
-            return reader, writer
+                return None, None, "SOCKS5 握手被拒"
+            return reader, writer, ""
 
         req = f"CONNECT {target_host}:{target_port} HTTP/1.1\r\nHost: {target_host}:{target_port}\r\n"
         if entry.get("user"):
@@ -231,28 +240,47 @@ async def open_tunnel(entry, target_host, target_port):
         writer.write(req.encode())
         await asyncio.wait_for(writer.drain(), timeout=CONNECT_TIMEOUT)
         head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=CONNECT_TIMEOUT)
-        if b" 200" not in head.split(b"\r\n")[0]:
+        first = head.split(b"\r\n")[0].decode("latin1", "replace")
+        if " 200" not in first:
             writer.close()
-            return None
-        return reader, writer
-    except Exception:
+            code = first.split(" ")[1] if len(first.split(" ")) > 1 else "?"
+            return None, None, f"CONNECT 被拒（{code}）"
+        return reader, writer, ""
+    except asyncio.TimeoutError:
         try:
             writer.close()
         except Exception:
             pass
-        return None
+        return None, None, "CONNECT 超时"
+    except Exception as e:
+        try:
+            writer.close()
+        except Exception:
+            pass
+        return None, None, f"CONNECT 失败（{e.__class__.__name__}）"
 
 
 async def check_entry(entry):
     t0 = time.time()
     th, _, tp = CHECK_TARGET.rpartition(":")
-    r = await open_tunnel(entry, th, int(tp))
+    r, w, reason = await open_tunnel(entry, th, int(tp))
     ms = int((time.time() - t0) * 1000)
     if r:
-        _, w = r
         w.close()
-        return True, ms
-    return False, ms
+        return True, ms, ""
+    return False, ms, reason
+
+
+async def check_many(entries):
+    """并发体检，并发上限取 settings['check_concurrency']。返回顺序与输入一致。"""
+    limit = max(1, int(settings.get("check_concurrency") or 8))
+    sem = asyncio.Semaphore(limit)
+
+    async def one(e):
+        async with sem:
+            return await check_entry(e)
+
+    return await asyncio.gather(*[one(e) for e in entries])
 
 
 def rotate_now(reason="按 TTL"):
@@ -277,15 +305,15 @@ async def health_loop():
     load_settings()
     pool = load_pool()
     log(f"代理池 {len(pool)} 条，开始体检（目标 {CHECK_TARGET}，间隔 {settings['health_sec']}s，"
-        f"连续失败 {settings['delete_after']} 次自动删除）")
+        f"连续失败 {settings['delete_after']} 次自动删除，并发 {settings['check_concurrency']}）")
     while True:
         async with pool_lock:
             snapshot = list(pool)
-        results = await asyncio.gather(*[check_entry(e) for e in snapshot])
+        results = await check_many(snapshot)
         dropped = []
         async with pool_lock:
             healthy = []
-            for e, (ok, _) in zip(snapshot, results):
+            for e, (ok, _ms, _reason) in zip(snapshot, results):
                 addr = entry_addr(e)
                 if ok:
                     healthy.append(e)
@@ -377,13 +405,18 @@ async def handle_admin(method, path, query, body, writer):
                     settings["health_sec"] = max(30, min(86400, int(payload["health_sec"])))
                 except Exception:
                     pass
+            if "check_concurrency" in payload:
+                try:
+                    settings["check_concurrency"] = max(1, min(64, int(payload["check_concurrency"])))
+                except Exception:
+                    pass
             if "delete_after" in payload:
                 try:
                     settings["delete_after"] = max(0, min(100, int(payload["delete_after"])))
                 except Exception:
                     pass
             save_settings()
-            log(f"设置更新：间隔 {settings['health_sec']}s，连续失败 {settings['delete_after']} 次删除")
+            log(f"设置更新：间隔 {settings['health_sec']}s，连续失败 {settings['delete_after']} 次删除，并发 {settings['check_concurrency']}")
             await send_json(writer, "200 OK", settings)
             return True
 
@@ -415,6 +448,7 @@ async def handle_admin(method, path, query, body, writer):
             results = []
             async with pool_lock:
                 existing = {entry_addr(e) for e in pool}
+            pending = []
             for raw in addrs[:200]:
                 entry = parse_entry(raw)
                 if not entry:
@@ -424,21 +458,21 @@ async def handle_admin(method, path, query, body, writer):
                 if addr in existing:
                     results.append({"addr": addr, "ok": True, "error": "已存在"})
                     continue
-                ok, ms = await check_entry(entry)
-                if not ok:
-                    results.append({"addr": addr, "ok": False,
-                                    "error": "验证失败（连接/证书/握手/CONNECT）"})
-                    continue
-                async with pool_lock:
-                    pool.append(entry)
-                    healthy.append(entry)
-                    fail_streak[addr] = 0
-                existing.add(addr)
-                results.append({"addr": addr, "ok": True, "latencyMs": ms, "scheme": entry["scheme"]})
-                log(f"新增代理 {entry_label(entry)}（{ms}ms）")
-            async with pool_lock:
-                save_pool()
-            await send_json(writer, "200 OK", {"results": results})
+                pending.append((addr, entry))
+            if pending:
+                checks = await check_many([e for _, e in pending])
+                for (addr, entry), (ok, ms, reason) in zip(pending, checks):
+                    if not ok:
+                        results.append({"addr": addr, "ok": False, "error": reason or "验证失败"})
+                        continue
+                    async with pool_lock:
+                        pool.append(entry)
+                        healthy.append(entry)
+                        fail_streak[addr] = 0
+                    existing.add(addr)
+                    results.append({"addr": addr, "ok": True, "latencyMs": ms,
+                                    "scheme": entry["scheme"]})
+                    log(f"新增代理 {entry_label(entry)}（{ms}ms）")
             return True
 
         if method == "DELETE":

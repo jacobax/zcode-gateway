@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ZCode Gateway</title>
-<link rel="stylesheet" href="/style.css?v=5">
+<link rel="stylesheet" href="/style.css?v=6">
 <script>
   // 夜间模式：在首屏渲染前决定主题，避免闪白
   try {
@@ -238,14 +238,14 @@
             <button class="btn ghost" id="proxy-reload">刷新列表</button>
           </div>
           <label class="field">
-            <span>添加代理（一行一个，支持 host:port / https://host:port / user:pass@host:port）</span>
-            <textarea class="input mono" id="proxy-input" rows="3" spellcheck="false"
-              placeholder="93.42.177.250:443&#10;83.206.1.225:8090&#10;user:pass@proxy.example.com:1443"></textarea>
+            <span>添加代理（一行一个，<code>#</code> 之后是注释）</span>
+            <textarea class="input mono" id="proxy-input" rows="5" spellcheck="false"
+              placeholder="96.36.49.83:443                  不写协议 = https（TLS 包装）&#10;https://1.2.3.4:8443              TLS 包装的 CONNECT&#10;http://5.6.7.8:3128                明文 CONNECT&#10;socks5://user:pass@9.9.9.9:1080   SOCKS5，可带认证&#10;socks5h://9.9.9.9:1080            SOCKS5，域名交给代理解析"></textarea>
             <div class="token-row">
               <button class="btn primary" id="proxy-add">验证并添加</button>
               <span class="muted" id="proxy-add-status"></span>
             </div>
-            <small>逐条验证：TLS 连上后 CONNECT zcode.z.ai:443，通过的才写入池子；中继每 10 分钟自动复检。</small>
+            <small>逐条验证：连上代理后发 <code>CONNECT zcode.z.ai:443</code>，通过才入库；失败的会给出具体原因（连接超时 / TLS 握手失败 / CONNECT 被拒 403 / SOCKS5 握手被拒）。</small>
           </label>
           <div class="proxy-tuning">
             <label class="field">
@@ -255,6 +255,10 @@
             <label class="field">
               <span>连续失败几次自动删除</span>
               <input class="input" id="proxy-delete-after" type="number" min="0" max="100" step="1">
+            </label>
+            <label class="field">
+              <span>检测并发数</span>
+              <input class="input" id="proxy-check-concurrency" type="number" min="1" max="64" step="1">
             </label>
             <button class="btn" id="proxy-save-settings">保存</button>
             <span class="muted" id="proxy-settings-status"></span>
@@ -355,6 +359,6 @@
 </div>
 
 <div class="toast" id="toast"></div>
-<script src="/app.js?v=5"></script>
+<script src="/app.js?v=6"></script>
 </body>
 </html>

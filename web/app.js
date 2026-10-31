@@ -710,6 +710,7 @@ async function loadProxies() {
     const s = data.settings || {};
     if ($('proxy-health-sec')) $('proxy-health-sec').value = s.health_sec || 600;
     if ($('proxy-delete-after')) $('proxy-delete-after').value = s.delete_after === 0 ? 0 : (s.delete_after || 3);
+    if ($('proxy-check-concurrency')) $('proxy-check-concurrency').value = s.check_concurrency || 8;
     renderProxies();
   } catch (error) {
     if (box) box.innerHTML = `<div class="muted">代理池不可用：${esc(error.message)}</div>`;
@@ -778,6 +779,7 @@ async function saveProxySettings() {
       body: JSON.stringify({
         health_sec: Number($('proxy-health-sec').value) || 600,
         delete_after: Number($('proxy-delete-after').value) || 0,
+        check_concurrency: Number($('proxy-check-concurrency').value) || 8,
       }),
     });
     status.textContent = `已保存：每 ${res.health_sec}s 复检，连续失败 ${res.delete_after} 次删除`;
