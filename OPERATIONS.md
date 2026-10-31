@@ -53,15 +53,25 @@ zcode-claimer.timer（每小时 :17）──► 面板管理接口 ──► 上
 `/usr/local/bin/zcode-gateway-autoupdate.sh`：
 
 ```
-git fetch origin main → 比对 VERSION 里的 commit → 备份 data/旧二进制
-→ checkout → go build → 冒烟（临时端口 3999）→ 停服务换二进制 → /health 检查
+查 latest release → 比对 VERSION 里的 tag → 下载 tar.gz + SHA256SUMS.txt
+→ 校验 SHA256 → 解包审查（拒绝含 data/、*.db、*.key、accounts.json、.env 的包）
+→ 冒烟（临时端口 3999）→ 备份 data/旧二进制 → 停服务换二进制 → /health 检查
 → 失败则装回旧二进制并重启
 ```
 
 - 日志：`/var/log/zcode-gateway-autoupdate.log`
 - 备份：`/opt/zcode-gateway-backups/<时间戳>/`（保留 7 份，含 SQLite 在线备份与旧二进制）
+- 发布包留档：`/opt/zcode-gateway/dist/<tag>/`（含 contrib/、deploy/，保留 5 份）
 - 手动触发：`systemctl start zcode-gateway-autoupdate.service`
-- 强制重建：`FORCE_REINSTALL=1 /usr/local/bin/zcode-gateway-autoupdate.sh`
+- 强制重装当前版本：`FORCE_REINSTALL=1 /usr/local/bin/zcode-gateway-autoupdate.sh`
+- 只替换二进制和文档，**不碰** `/opt/zcode-relay`、`/opt/zcode-claimer`（独立部署，可能有本地改动）
+PUT >94:
+
+9. **首次启动会自动导入桌面端账号**。`store.go` 的 `NewStore()` 在账号表为空时调用
+   `ImportDesktop()`，读 `~/.zcode/v2/credentials.json`（ZCode 桌面端登录凭据）解密后
+   写入 `data/accounts.json`。所以在装了桌面端并登录过的机器上跑一个全新的二进制，
+   面板里会直接出现本机账号——这是上游行为，不是发布包里带了数据。日志会打一行
+   `已从桌面端导入 N 个账号（来源 …）`；没有凭据时打 `未发现桌面端凭据 …，跳过自动导入`。
 
 ## 已知坑（都踩过）
 
@@ -92,6 +102,12 @@ git fetch origin main → 比对 VERSION 里的 commit → 备份 data/旧二进
    （`enabled && Remaining > 0`），两者会差出这些号——看到数字对不上先查这里。
    `contrib/claimer` 的自动启停就是补这个洞：`granted==0` 连续两轮就禁用，
    等额度回来再自动启用。
+
+9. **首次启动会自动导入桌面端账号**。`store.go` 的 `NewStore()` 在账号表为空时调用
+   `ImportDesktop()`，读 `~/.zcode/v2/credentials.json`（ZCode 桌面端登录凭据）解密后
+   写入 `data/accounts.json`。所以在装了桌面端并登录过的机器上跑一个全新的二进制，
+   面板里会直接出现本机账号——这是上游行为，不是发布包里带了数据。日志会打一行
+   `已从桌面端导入 N 个账号（来源 …）`；没有凭据时打 `未发现桌面端凭据 …，跳过自动导入`。
 
 ## 出口 IP 与风控
 

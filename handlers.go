@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -148,7 +149,9 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"items": s.store.Summaries()})
+	items := s.store.Summaries()
+	log.Printf("面板触发桌面端导入，当前共 %d 个账号（来源 %s）", len(items), desktopCredentialsPath())
+	writeJSON(w, 200, map[string]any{"items": items})
 }
 
 func (s *Server) handleOAuthStatus(w http.ResponseWriter, r *http.Request) {

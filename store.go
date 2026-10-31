@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/url"
 	"os"
 	"os/user"
@@ -69,9 +70,15 @@ func NewStore(dir string) (*Store, error) {
 	}
 	_ = db.ImportJSONL(s.dirPath("logs.jsonl"))
 	if len(s.accounts) == 0 {
-		if err := s.ImportDesktop(); err != nil {
-			// Import is best-effort; a fresh install may have no desktop login.
-			_ = err
+		before := len(s.accounts)
+		err := s.ImportDesktop()
+		switch {
+		case err == nil:
+			log.Printf("已从桌面端导入 %d 个账号（来源 %s）", len(s.accounts)-before, desktopCredentialsPath())
+		case errors.Is(err, os.ErrNotExist):
+			log.Printf("未发现桌面端凭据 %s，跳过自动导入", desktopCredentialsPath())
+		default:
+			log.Printf("桌面端凭据导入失败（%s）：%v", desktopCredentialsPath(), err)
 		}
 	}
 	s.attachProfiles()
@@ -657,13 +664,24 @@ func decryptDesktop(value string, keys [][]byte) (string, error) {
 	return "", lastErr
 }
 
-func (s *Store) ImportDesktop() error {
+// desktopCredentialsPath 是 ZCode 桌面端存放登录凭据的位置，导入账号时读它。
+func desktopCredentialsPath() string {
 	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".zcode", "v2", "credentials.json")
+}
+
+func (s *Store) ImportDesktop() error {
+	path := desktopCredentialsPath()
+	if path == "" {
+		return os.ErrNotExist
+	}
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(home, ".zcode", "v2", "credentials.json")
-	raw, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
