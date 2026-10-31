@@ -13,6 +13,7 @@ const state = {
   activityAccountId: null,
   activityCaptcha: null,
   proxies: null,
+  accountSort: { key: 'priority', dir: 'asc' },
 };
 
 const numberFmt = new Intl.NumberFormat('zh-CN');
@@ -230,12 +231,50 @@ async function loadAccounts() {
     toast(error.message, true);
   }
 }
+const ACCOUNT_SORT_KEYS = {
+  priority: (a) => Number(a.priority) || 0,
+  label: (a) => (a.label || '').toLowerCase(),
+  mode: (a) => a.mode || '',
+  status: (a) => a.status || '',
+  quota: (a) => Number((a.quota || {}).remaining) || 0,
+  todayTokens: (a) => sumUsage(a.today || {}),
+  totalTokens: (a) => sumUsage(a.usage || {}),
+  requests: (a) => Number((a.today || {}).requests) || 0,
+  concurrency: (a) => Number(a.concurrency) || 0,
+  lastUsed: (a) => Number(a.lastUsedAt) || 0,
+};
+
+function sortedAccounts() {
+  const { key, dir } = state.accountSort;
+  const get = ACCOUNT_SORT_KEYS[key] || ACCOUNT_SORT_KEYS.priority;
+  const sign = dir === 'desc' ? -1 : 1;
+  return [...state.accounts].sort((x, y) => {
+    const vx = get(x);
+    const vy = get(y);
+    if (vx < vy) return -sign;
+    if (vx > vy) return sign;
+    return 0;
+  });
+}
+
+function updateSortMarks() {
+  const table = $('accounts-table');
+  if (!table) return;
+  table.querySelectorAll('th[data-sort]').forEach((th) => {
+    if (th.dataset.sort === state.accountSort.key) {
+      th.dataset.dir = state.accountSort.dir;
+    } else {
+      delete th.dataset.dir;
+    }
+  });
+}
 
 function renderAccounts() {
   const tbody = $('accounts-table').querySelector('tbody');
-  tbody.innerHTML = state.accounts.map(accountRow).join('');
+  tbody.innerHTML = sortedAccounts().map(accountRow).join('');
   $('accounts-empty').classList.toggle('hidden', state.accounts.length > 0);
   $('accounts-table').classList.toggle('hidden', state.accounts.length === 0);
+  updateSortMarks();
 }
 
 function accountRow(account, index) {
@@ -707,6 +746,9 @@ async function loadProxies() {
   try {
     const data = await api('/api/proxies');
     state.proxies = data;
+    const items = data.items || [];
+    const healthy = items.filter((i) => i.healthy).length;
+    if ($('proxy-count')) $('proxy-count').textContent = `共 ${items.length} 条 / 健康 ${healthy}`;
     const s = data.settings || {};
     if ($('proxy-health-sec')) $('proxy-health-sec').value = s.health_sec || 600;
     if ($('proxy-delete-after')) $('proxy-delete-after').value = s.delete_after === 0 ? 0 : (s.delete_after || 3);
@@ -748,13 +790,17 @@ async function addProxies() {
   status.textContent = `验证中（${addrs.length} 条）…`;
   try {
     const res = await api('/api/proxies', { method: 'POST', body: JSON.stringify({ addrs }) });
-    const results = res.results || [];
-    const ok = results.filter((r) => r.ok).length;
-    const bad = results.length - ok;
-    status.textContent = `成功 ${ok} 条${bad ? `，失败 ${bad} 条` : ''}`;
-    const fails = results.filter((r) => !r.ok).map((r) => `${r.addr}：${r.error}`).join('；');
+    const s = res.summary || {};
+    const parts = [`共 ${s.total ?? addrs.length} 条`];
+    if (s.added) parts.push(`新增 ${s.added}`);
+    if (s.existing) parts.push(`已存在 ${s.existing}`);
+    if (s.invalid) parts.push(`格式错误 ${s.invalid}`);
+    if (s.failed) parts.push(`验证失败 ${s.failed}`);
+    status.textContent = parts.join(' · ');
+    const fails = (res.results || []).filter((r) => !r.ok)
+      .map((r) => `${r.addr}：${r.error}`).join('；');
     if (fails) toast(fails.slice(0, 220), true);
-    $('proxy-input').value = '';
+    if (s.added) $('proxy-input').value = '';
     await loadProxies();
   } catch (error) {
     status.textContent = '';
@@ -1036,6 +1082,22 @@ if ($('theme-toggle')) {
   });
 }
 
+
+// 账号表：点表头排序
+if ($('accounts-table')) {
+  $('accounts-table').querySelector('thead').addEventListener('click', (event) => {
+    const th = event.target.closest('th[data-sort]');
+    if (!th) return;
+    const key = th.dataset.sort;
+    if (state.accountSort.key === key) {
+      state.accountSort.dir = state.accountSort.dir === 'asc' ? 'desc' : 'asc';
+    } else {
+      const textFirst = ['label', 'mode', 'status'].includes(key);
+      state.accountSort = { key, dir: textFirst ? 'asc' : 'desc' };
+    }
+    renderAccounts();
+  });
+}
 // 代理池操作
 if ($('proxy-add')) $('proxy-add').addEventListener('click', addProxies);
 if ($('proxy-reload')) $('proxy-reload').addEventListener('click', loadProxies);

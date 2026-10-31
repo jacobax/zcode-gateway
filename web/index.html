@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ZCode Gateway</title>
-<link rel="stylesheet" href="/style.css?v=6">
+<link rel="stylesheet" href="/style.css?v=7">
 <script>
   // 夜间模式：在首屏渲染前决定主题，避免闪白
   try {
@@ -41,6 +41,7 @@
     <div class="sidebar-footer">
       <div class="status-line"><span class="dot" id="server-dot"></span><span id="server-status">连接中</span></div>
       <div class="muted" id="sidebar-version">v-</div>
+      <a class="sidebar-link" href="https://github.com/jacobax/zcode-gateway" target="_blank" rel="noopener">GitHub · jacobax/zcode-gateway</a>
     </div>
   </aside>
 
@@ -134,7 +135,19 @@
       <div class="card">
         <div class="table-wrap">
           <table class="table accounts-table" id="accounts-table">
-            <thead><tr><th class="w-priority">优先级</th><th>账号</th><th>模式</th><th>状态</th><th>额度</th><th>今日 Tokens</th><th>总 Tokens</th><th>请求 / 成功率</th><th>并发</th><th>最后使用</th><th class="w-actions">操作</th></tr></thead>
+        <thead><tr>
+          <th class="w-priority sortable" data-sort="priority">优先级</th>
+          <th class="sortable" data-sort="label">账号</th>
+          <th class="sortable" data-sort="mode">模式</th>
+          <th class="sortable" data-sort="status">状态</th>
+          <th class="sortable" data-sort="quota">额度</th>
+          <th class="sortable" data-sort="todayTokens">今日 Tokens</th>
+          <th class="sortable" data-sort="totalTokens">总 Tokens</th>
+          <th class="sortable" data-sort="requests">请求 / 成功率</th>
+          <th class="sortable" data-sort="concurrency">并发</th>
+          <th class="sortable" data-sort="lastUsed">最后使用</th>
+          <th class="w-actions">操作</th>
+        </tr></thead>
             <tbody></tbody>
           </table>
         </div>
@@ -235,6 +248,7 @@
         <div class="card">
           <div class="card-head">
             <div><div class="card-kicker">领取代理池</div><h2>住宅代理</h2></div>
+            <span class="muted" id="proxy-count">-</span>
             <button class="btn ghost" id="proxy-reload">刷新列表</button>
           </div>
           <label class="field">
@@ -359,6 +373,6 @@
 </div>
 
 <div class="toast" id="toast"></div>
-<script src="/app.js?v=6"></script>
+<script src="/app.js?v=7"></script>
 </body>
 </html>

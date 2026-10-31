@@ -449,6 +449,7 @@ async def handle_admin(method, path, query, body, writer):
             async with pool_lock:
                 existing = {entry_addr(e) for e in pool}
             pending = []
+            dup = 0
             for raw in addrs[:200]:
                 entry = parse_entry(raw)
                 if not entry:
@@ -456,9 +457,13 @@ async def handle_admin(method, path, query, body, writer):
                     continue
                 addr = entry_addr(entry)
                 if addr in existing:
-                    results.append({"addr": addr, "ok": True, "error": "已存在"})
+                    # 池子里已有，或这一批里前面已经出现过同一条
+                    results.append({"addr": addr, "ok": True, "existing": True, "error": "已存在"})
+                    dup += 1
                     continue
+                existing.add(addr)
                 pending.append((addr, entry))
+            added = 0
             if pending:
                 checks = await check_many([e for _, e in pending])
                 for (addr, entry), (ok, ms, reason) in zip(pending, checks):
@@ -469,10 +474,20 @@ async def handle_admin(method, path, query, body, writer):
                         pool.append(entry)
                         healthy.append(entry)
                         fail_streak[addr] = 0
-                    existing.add(addr)
+                    added += 1
                     results.append({"addr": addr, "ok": True, "latencyMs": ms,
                                     "scheme": entry["scheme"]})
                     log(f"新增代理 {entry_label(entry)}（{ms}ms）")
+            if added:
+                async with pool_lock:
+                    save_pool()
+            invalid = sum(1 for r in results if r.get("error") == "格式不合法")
+            failed = sum(1 for r in results if not r.get("ok"))
+            summary = {"total": len(results), "added": added, "existing": dup,
+                       "invalid": invalid, "failed": failed - invalid}
+            log(f"批量添加：共 {summary['total']} 条，新增 {added}，已存在 {dup}，"
+                f"格式错误 {invalid}，验证失败 {summary['failed']}")
+            await send_json(writer, "200 OK", {"results": results, "summary": summary})
             return True
 
         if method == "DELETE":

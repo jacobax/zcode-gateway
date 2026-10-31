@@ -1,0 +1,38 @@
+name: CI
+
+# 每次推 main 或开 PR 都跑一遍：vet + test + 构建。
+# 发布走 release.yml（推 v* tag 时编译六个平台并建 Release）。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.27"
+
+jobs:
+  build:
+    name: Vet / Test / Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: go vet
+        run: go vet ./...
+      - name: go test
+        run: go test ./...
+      - name: go build
+        run: go build -trimpath -ldflags="-s -w" -o /tmp/zcode-gateway .
+      - name: 检查前端资源
+        run: |
+          set -euo pipefail
+          # 面板资源靠 ?v=N 绕过 CDN 缓存，改 web/ 必须 bump，这里做个提醒式校验
+          node --check web/app.js
+          node --check web/login.js
