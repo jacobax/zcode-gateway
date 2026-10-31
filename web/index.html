@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ZCode Gateway</title>
-<link rel="stylesheet" href="/style.css?v=4">
+<link rel="stylesheet" href="/style.css?v=5">
 <script>
   // 夜间模式：在首屏渲染前决定主题，避免闪白
   try {
@@ -247,6 +247,18 @@
             </div>
             <small>逐条验证：TLS 连上后 CONNECT zcode.z.ai:443，通过的才写入池子；中继每 10 分钟自动复检。</small>
           </label>
+          <div class="proxy-tuning">
+            <label class="field">
+              <span>复检间隔（秒）</span>
+              <input class="input" id="proxy-health-sec" type="number" min="30" max="86400" step="30">
+            </label>
+            <label class="field">
+              <span>连续失败几次自动删除</span>
+              <input class="input" id="proxy-delete-after" type="number" min="0" max="100" step="1">
+            </label>
+            <button class="btn" id="proxy-save-settings">保存</button>
+            <span class="muted" id="proxy-settings-status"></span>
+          </div>
           <div class="proxy-list" id="proxy-list"></div>
         </div>
       </div>
@@ -343,6 +355,6 @@
 </div>
 
 <div class="toast" id="toast"></div>
-<script src="/app.js?v=4"></script>
+<script src="/app.js?v=5"></script>
 </body>
 </html>

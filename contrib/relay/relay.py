@@ -1,31 +1,37 @@
 #!/usr/bin/env python3
-"""zcode-relay —— 把一批「TLS 包装的住宅代理」转成网关能用的明文 HTTP 代理。
+"""zcode-relay —— 代理池中继：把 http / https / socks5 代理统一成网关能用的明文 HTTP 代理。
 
 为什么需要它：
-  那批代理是 https:// 形式（TLS 包装，自签证书且没有 IP SAN）。网关用的
+  https:// 形式的代理是 TLS 包装的（自签证书、没有 IP SAN），网关用的
   bogdanfinn/tls-client 在代理拨号阶段会校验证书，`WithInsecureSkipVerify`
   只作用于上游 TLS、救不了代理那一段（实测 x509: cannot validate certificate）。
-  所以在本地起一个明文 CONNECT 代理，由它去和上游代理做 TLS（不校验证书）。
+  所以在本地起一个明文 CONNECT 代理，由它去和上游代理握手（https 走 TLS 不校验证书，
+  socks5 走 SOCKS5 握手）。
 
 行为：
   - 监听 127.0.0.1:3129，只接受 CONNECT
-  - 上游池来自 POOL_FILE，一行一个 host:port（`#` 之后是注释；支持 user:pass@host:port）
-  - 按 TTL 轮换出口（默认 50 分钟），轮换时断开已有隧道
-  - 每 HEALTH_INTERVAL 秒重新体检；体检方式是 TLS 连上后 CONNECT zcode.z.ai:443 看回 200
+  - 上游池来自 POOL_FILE，一行一个，支持：
+        host:port                 （等价 https://host:port，兼容老数据）
+        http://host:port          （明文 CONNECT）
+        https://host:port         （TLS 包装的 CONNECT）
+        socks5://user:pass@host:port
+        socks5h://host:port       （远端解析域名）
+    行内 `#` 之后是注释
+  - 按 TTL 轮换出口，轮换时断开已有隧道
+  - 每 health_sec 秒体检一次；连续 delete_after 次失败自动从池子里删掉
   - 单个隧道失败会自动换下一个健康代理重试（最多 3 次），全失败回 502
 
 管理接口（都只允许回环访问）：
-  GET    /rotate            立即换一个出口，返回新的 host:port
-  GET    /proxies           列出池子：地址 / 是否健康 / 是否当前出口
-  POST   /proxies           {"addrs":["host:port", ...]} 逐条验证，通过的写回池文件
-  DELETE /proxies?addr=…    从池子里删掉一条
+  GET    /rotate             立即换一个出口
+  GET    /proxies            列出池子（地址 / 健康 / 当前 / 连续失败次数）
+  POST   /proxies            {"addrs":[...]} 逐条验证，通过的写回池文件
+  DELETE /proxies?addr=…     删除一条
+  GET    /settings           体检间隔与自动删除阈值
+  POST   /settings           {"health_sec":N,"delete_after":M} 热更新
 
 环境变量：
-  RELAY_LISTEN     默认 127.0.0.1:3129
-  RELAY_POOL       默认 /etc/zcode-relay/proxies.txt
-  RELAY_TTL_SEC    默认 3000
-  RELAY_HEALTH_SEC 默认 600
-  RELAY_LOG        默认 /var/log/zcode-relay.log
+  RELAY_LISTEN / RELAY_POOL / RELAY_TTL_SEC / RELAY_LOG / RELAY_CHECK_TARGET
+  RELAY_SETTINGS     默认 /etc/zcode-relay/settings.json
 """
 import asyncio
 import base64
@@ -40,21 +46,25 @@ import urllib.parse
 LISTEN_HOST, LISTEN_PORT = (os.environ.get("RELAY_LISTEN", "127.0.0.1:3129").rsplit(":", 1))
 LISTEN_PORT = int(LISTEN_PORT)
 POOL_FILE = os.environ.get("RELAY_POOL", "/etc/zcode-relay/proxies.txt")
+SETTINGS_FILE = os.environ.get("RELAY_SETTINGS", "/etc/zcode-relay/settings.json")
 TTL_SEC = int(os.environ.get("RELAY_TTL_SEC", "3000"))
-HEALTH_SEC = int(os.environ.get("RELAY_HEALTH_SEC", "600"))
 LOG_PATH = os.environ.get("RELAY_LOG", "/var/log/zcode-relay.log")
 CHECK_TARGET = os.environ.get("RELAY_CHECK_TARGET", "zcode.z.ai:443")
 CONNECT_TIMEOUT = float(os.environ.get("RELAY_CONNECT_TIMEOUT", "10"))
+
+DEFAULT_SETTINGS = {"health_sec": 600, "delete_after": 3}
 
 ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 ssl_ctx.check_hostname = False
 ssl_ctx.verify_mode = ssl.CERT_NONE
 
-pool = []             # [(host, port, auth_header)]
+pool = []             # [{"scheme","host","port","user","pass"}]
 healthy = []
+fail_streak = {}      # addr -> 连续失败次数
 current = None
 tunnels = set()
 pool_lock = asyncio.Lock()
+settings = dict(DEFAULT_SETTINGS)
 
 
 def log(msg):
@@ -67,28 +77,67 @@ def log(msg):
         pass
 
 
-def entry_addr(entry):
-    host, port, _ = entry
-    return f"{host}:{port}"
+def entry_addr(e):
+    # https 省略前缀（兼容老数据），其它协议带上，否则 http/https 同端口会被当成同一条
+    if e["scheme"] == "https":
+        return f"{e['host']}:{e['port']}"
+    return f"{e['scheme']}://{e['host']}:{e['port']}"
+
+
+def entry_label(e):
+    """池文件里的一行（带 scheme，https 省略前缀保持可读）。"""
+    auth = f"{e['user']}:{e['pass']}@" if e.get("user") else ""
+    if e["scheme"] == "https":
+        return f"{auth}{e['host']}:{e['port']}"
+    return f"{e['scheme']}://{auth}{e['host']}:{e['port']}"
 
 
 def parse_entry(raw):
-    """把一行解析成 (host, port, auth)；不合法返回 None。"""
+    """解析一行成 dict；不合法返回 None。"""
     raw = (raw or "").strip()
     if not raw or raw.startswith("#"):
         return None
-    raw = raw.split("#", 1)[0].strip()
-    if raw.startswith("http://") or raw.startswith("https://"):
-        raw = raw.split("://", 1)[1]
-    raw = raw.rstrip("/")
-    auth = None
+    raw = raw.split("#", 1)[0].strip().rstrip("/")
+    scheme = "https"                      # 老数据没有 scheme，按 https 处理
+    if "://" in raw:
+        scheme, _, raw = raw.partition("://")
+        scheme = scheme.lower()
+    if scheme == "socks5h":
+        scheme = "socks5"
+    if scheme not in ("http", "https", "socks5"):
+        return None
+    user = pw = None
     if "@" in raw:
         cred, _, raw = raw.rpartition("@")
-        auth = "Basic " + base64.b64encode(cred.encode()).decode()
+        user, _, pw = cred.partition(":")
     host, _, port = raw.rpartition(":")
     if not host or not port.isdigit() or not (0 < int(port) < 65536):
         return None
-    return host, int(port), auth
+    return {"scheme": scheme, "host": host, "port": int(port), "user": user, "pass": pw}
+
+
+def load_settings():
+    global settings
+    try:
+        data = json.load(open(SETTINGS_FILE))
+        for k in DEFAULT_SETTINGS:
+            if k in data:
+                settings[k] = int(data[k])
+    except Exception:
+        pass
+    settings["health_sec"] = max(30, min(86400, int(settings.get("health_sec", 600))))
+    settings["delete_after"] = max(0, min(100, int(settings.get("delete_after", 3))))
+
+
+def save_settings():
+    try:
+        tmp = SETTINGS_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(settings, f)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, SETTINGS_FILE)
+    except Exception as e:
+        log(f"WARN: 写设置失败 {e}")
 
 
 def load_pool():
@@ -104,14 +153,7 @@ def load_pool():
 
 
 def save_pool():
-    """把当前池子写回文件（保留 user:pass@ 形式）。"""
-    lines = []
-    for host, port, auth in pool:
-        if auth:
-            cred = base64.b64decode(auth.split(" ", 1)[1]).decode()
-            lines.append(f"{cred}@{host}:{port}")
-        else:
-            lines.append(f"{host}:{port}")
+    lines = [entry_label(e) for e in pool]
     try:
         tmp = POOL_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -122,19 +164,69 @@ def save_pool():
         log(f"WARN: 写回代理池失败 {e}")
 
 
-async def try_upstream(entry, target_host, target_port):
-    """连上游代理并发 CONNECT，成功返回 (reader, writer)。"""
-    host, port, auth = entry
+async def socks5_handshake(reader, writer, host, port, user, password):
+    methods = b"\x00" if not user else b"\x00\x02"
+    writer.write(b"\x05" + bytes([len(methods)]) + methods)
+    await writer.drain()
+    resp = await reader.readexactly(2)
+    if resp[0] != 5:
+        return False
+    if resp[1] == 0x02:
+        if not user:
+            return False
+        u = user.encode()
+        p = (password or "").encode()
+        writer.write(b"\x01" + bytes([len(u)]) + u + bytes([len(p)]) + p)
+        await writer.drain()
+        ar = await reader.readexactly(2)
+        if ar[1] != 0:
+            return False
+    elif resp[1] != 0x00:
+        return False
+    hb = host.encode()
+    writer.write(b"\x05\x01\x00\x03" + bytes([len(hb)]) + hb + port.to_bytes(2, "big"))
+    await writer.drain()
+    rep = await reader.readexactly(4)
+    if rep[1] != 0:
+        return False
+    atyp = rep[3]
+    if atyp == 1:
+        await reader.readexactly(4)
+    elif atyp == 4:
+        await reader.readexactly(16)
+    elif atyp == 3:
+        ln = (await reader.readexactly(1))[0]
+        await reader.readexactly(ln)
+    await reader.readexactly(2)
+    return True
+
+
+async def open_tunnel(entry, target_host, target_port):
+    """连上游代理并打通到 target，成功返回 (reader, writer)。"""
+    host, port = entry["host"], entry["port"]
+    use_tls = entry["scheme"] == "https"
     try:
         reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(host, port, ssl=ssl_ctx, server_hostname=host),
+            asyncio.open_connection(host, port, ssl=ssl_ctx if use_tls else None,
+                                    server_hostname=host if use_tls else None),
             timeout=CONNECT_TIMEOUT)
     except Exception:
         return None
     try:
+        if entry["scheme"] == "socks5":
+            ok = await asyncio.wait_for(
+                socks5_handshake(reader, writer, target_host, target_port,
+                                 entry.get("user"), entry.get("pass")),
+                timeout=CONNECT_TIMEOUT)
+            if not ok:
+                writer.close()
+                return None
+            return reader, writer
+
         req = f"CONNECT {target_host}:{target_port} HTTP/1.1\r\nHost: {target_host}:{target_port}\r\n"
-        if auth:
-            req += f"Proxy-Authorization: {auth}\r\n"
+        if entry.get("user"):
+            cred = f"{entry['user']}:{entry.get('pass') or ''}".encode()
+            req += "Proxy-Authorization: Basic " + base64.b64encode(cred).decode() + "\r\n"
         req += "\r\n"
         writer.write(req.encode())
         await asyncio.wait_for(writer.drain(), timeout=CONNECT_TIMEOUT)
@@ -153,13 +245,14 @@ async def try_upstream(entry, target_host, target_port):
 
 async def check_entry(entry):
     t0 = time.time()
-    target_host, _, target_port = CHECK_TARGET.rpartition(":")
-    r = await try_upstream(entry, target_host, int(target_port))
+    th, _, tp = CHECK_TARGET.rpartition(":")
+    r = await open_tunnel(entry, th, int(tp))
+    ms = int((time.time() - t0) * 1000)
     if r:
         _, w = r
         w.close()
-        return True, int((time.time() - t0) * 1000)
-    return False, int((time.time() - t0) * 1000)
+        return True, ms
+    return False, ms
 
 
 def rotate_now(reason="按 TTL"):
@@ -180,24 +273,42 @@ def rotate_now(reason="按 TTL"):
 
 
 async def health_loop():
-    global pool, healthy, current
+    global pool, healthy, current, fail_streak
+    load_settings()
     pool = load_pool()
-    log(f"代理池 {len(pool)} 条，开始体检（目标 {CHECK_TARGET}）")
-    results = await asyncio.gather(*[check_entry(e) for e in pool])
-    healthy = [e for e, (ok, _) in zip(pool, results) if ok]
-    log(f"体检完成：健康 {len(healthy)}/{len(pool)}")
-    if healthy and current is None:
-        rotate_now("首次选择")
+    log(f"代理池 {len(pool)} 条，开始体检（目标 {CHECK_TARGET}，间隔 {settings['health_sec']}s，"
+        f"连续失败 {settings['delete_after']} 次自动删除）")
     while True:
-        await asyncio.sleep(HEALTH_SEC)
         async with pool_lock:
             snapshot = list(pool)
         results = await asyncio.gather(*[check_entry(e) for e in snapshot])
+        dropped = []
         async with pool_lock:
-            healthy = [e for e, (ok, _) in zip(snapshot, results) if ok]
-        log(f"复检完成：健康 {len(healthy)}/{len(pool)}")
+            healthy = []
+            for e, (ok, _) in zip(snapshot, results):
+                addr = entry_addr(e)
+                if ok:
+                    healthy.append(e)
+                    fail_streak[addr] = 0
+                    continue
+                fail_streak[addr] = fail_streak.get(addr, 0) + 1
+                if settings["delete_after"] > 0 and fail_streak[addr] >= settings["delete_after"]:
+                    dropped.append(e)
+            if dropped:
+                drop_addrs = {entry_addr(e) for e in dropped}
+                pool = [e for e in pool if entry_addr(e) not in drop_addrs]
+                for a in drop_addrs:
+                    fail_streak.pop(a, None)
+                save_pool()
+                if current and entry_addr(current) in drop_addrs:
+                    rotate_now("当前出口被判死")
+        log(f"复检完成：健康 {len(healthy)}/{len(pool)}"
+            + (f"，自动删除 {len(dropped)} 条：{', '.join(entry_addr(e) for e in dropped)}" if dropped else ""))
         if not healthy:
             current = None
+        elif current is None or current not in healthy:
+            rotate_now("首次选择")
+        await asyncio.sleep(max(30, settings["health_sec"]))
 
 
 async def rotate_loop():
@@ -244,21 +355,52 @@ async def send_json(writer, status, payload):
 
 
 async def handle_admin(method, path, query, body, writer):
-    """返回 True 表示已处理。"""
-    global pool, healthy, current
+    global pool, healthy, current, settings
 
     if path == "/rotate":
         entry = rotate_now("脚本请求")
         await send_json(writer, "200 OK", {"current": entry_addr(entry) if entry else None})
         return True
 
+    if path == "/settings":
+        if method == "GET":
+            await send_json(writer, "200 OK", settings)
+            return True
+        if method == "POST":
+            try:
+                payload = json.loads(body or b"{}")
+            except Exception:
+                await send_json(writer, "400 Bad Request", {"error": "invalid json"})
+                return True
+            if "health_sec" in payload:
+                try:
+                    settings["health_sec"] = max(30, min(86400, int(payload["health_sec"])))
+                except Exception:
+                    pass
+            if "delete_after" in payload:
+                try:
+                    settings["delete_after"] = max(0, min(100, int(payload["delete_after"])))
+                except Exception:
+                    pass
+            save_settings()
+            log(f"设置更新：间隔 {settings['health_sec']}s，连续失败 {settings['delete_after']} 次删除")
+            await send_json(writer, "200 OK", settings)
+            return True
+
     if path == "/proxies":
         if method == "GET":
             cur = entry_addr(current) if current else None
             hset = {entry_addr(e) for e in healthy}
-            items = [{"addr": entry_addr(e), "healthy": entry_addr(e) in hset,
-                      "current": entry_addr(e) == cur} for e in pool]
-            await send_json(writer, "200 OK", {"current": cur, "total": len(items), "items": items})
+            items = [{
+                "addr": entry_addr(e),
+                "scheme": e["scheme"],
+                "label": entry_label(e),
+                "healthy": entry_addr(e) in hset,
+                "current": entry_addr(e) == cur,
+                "failStreak": fail_streak.get(entry_addr(e), 0),
+            } for e in pool]
+            await send_json(writer, "200 OK",
+                            {"current": cur, "total": len(items), "items": items, "settings": settings})
             return True
 
         if method == "POST":
@@ -284,14 +426,16 @@ async def handle_admin(method, path, query, body, writer):
                     continue
                 ok, ms = await check_entry(entry)
                 if not ok:
-                    results.append({"addr": addr, "ok": False, "error": "验证失败（连接/证书/CONNECT）"})
+                    results.append({"addr": addr, "ok": False,
+                                    "error": "验证失败（连接/证书/握手/CONNECT）"})
                     continue
                 async with pool_lock:
                     pool.append(entry)
                     healthy.append(entry)
+                    fail_streak[addr] = 0
                 existing.add(addr)
-                results.append({"addr": addr, "ok": True, "latencyMs": ms})
-                log(f"新增代理 {addr}（{ms}ms）")
+                results.append({"addr": addr, "ok": True, "latencyMs": ms, "scheme": entry["scheme"]})
+                log(f"新增代理 {entry_label(entry)}（{ms}ms）")
             async with pool_lock:
                 save_pool()
             await send_json(writer, "200 OK", {"results": results})
@@ -303,13 +447,16 @@ async def handle_admin(method, path, query, body, writer):
                 await send_json(writer, "400 Bad Request", {"error": "缺少 addr"})
                 return True
             async with pool_lock:
+                before = len(pool)
                 pool = [e for e in pool if entry_addr(e) != addr]
                 healthy = [e for e in healthy if entry_addr(e) != addr]
+                fail_streak.pop(addr, None)
+                removed = before - len(pool)
                 save_pool()
             if current and entry_addr(current) == addr:
                 rotate_now("当前出口被删除")
-            log(f"删除代理 {addr}")
-            await send_json(writer, "200 OK", {"ok": True, "addr": addr})
+            log(f"删除代理 {addr}（{'成功' if removed else '未找到'}）")
+            await send_json(writer, "200 OK", {"ok": removed > 0, "addr": addr})
             return True
 
     return False
@@ -361,7 +508,7 @@ async def handle(client_reader, client_writer):
 
     candidates = ([current] if current else []) + [e for e in healthy if e != current]
     for entry in candidates[:3]:
-        r = await try_upstream(entry, target_host, int(target_port))
+        r = await open_tunnel(entry, target_host, int(target_port))
         if not r:
             continue
         up_reader, up_writer = r
@@ -372,7 +519,7 @@ async def handle(client_reader, client_writer):
             up_writer.close()
             return
         tunnels.add(client_writer)
-        log(f"隧道 {entry_addr(entry)} → {target_host}:{target_port}")
+        log(f"隧道 {entry['scheme']}://{entry_addr(entry)} → {target_host}:{target_port}")
         try:
             await asyncio.gather(pipe(client_reader, up_writer), pipe(up_reader, client_writer))
         finally:
@@ -394,10 +541,11 @@ async def handle(client_reader, client_writer):
 
 
 async def main():
+    load_settings()
     asyncio.create_task(health_loop())
     asyncio.create_task(rotate_loop())
     server = await asyncio.start_server(handle, LISTEN_HOST, LISTEN_PORT)
-    log(f"监听 {LISTEN_HOST}:{LISTEN_PORT}，TTL={TTL_SEC}s，体检间隔={HEALTH_SEC}s")
+    log(f"监听 {LISTEN_HOST}:{LISTEN_PORT}，TTL={TTL_SEC}s")
     async with server:
         await server.serve_forever()
 

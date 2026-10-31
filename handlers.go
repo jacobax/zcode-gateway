@@ -746,39 +746,28 @@ func decodeJSON(r *http.Request, target any) error {
 
 // handleProxies 把面板里的代理池操作转发给本地中继（contrib/relay 的管理口）。
 // 中继只监听回环，网关是它唯一入口，所以鉴权沿用面板登录态。
-func (s *Server) handleProxies(w http.ResponseWriter, r *http.Request) {
+// relayRequest 把请求原样转发给本地中继（contrib/relay 的管理口），
+// 中继只监听回环，网关是它唯一入口，所以鉴权沿用面板登录态。
+func (s *Server) relayRequest(w http.ResponseWriter, method, path string, body []byte) {
 	base := envOr("ZCODE_RELAY_ADMIN", "http://127.0.0.1:3129")
 	client := &http.Client{Timeout: 120 * time.Second}
 	var (
-		resp *http.Response
-		err  error
+		req *http.Request
+		err error
 	)
-	switch r.Method {
-	case http.MethodGet:
-		resp, err = client.Get(base + "/proxies")
-	case http.MethodPost:
-		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-		var req *http.Request
-		req, err = http.NewRequest(http.MethodPost, base+"/proxies", bytes.NewReader(body))
-		if err != nil {
-			writeError(w, 500, err.Error())
-			return
-		}
-		req.Header.Set("Content-Type", "application/json")
-		resp, err = client.Do(req)
-	case http.MethodDelete:
-		addr := r.URL.Query().Get("addr")
-		var req *http.Request
-		req, err = http.NewRequest(http.MethodDelete, base+"/proxies?addr="+url.QueryEscape(addr), nil)
-		if err != nil {
-			writeError(w, 500, err.Error())
-			return
-		}
-		resp, err = client.Do(req)
-	default:
-		writeError(w, 405, "method not allowed")
+	if body != nil {
+		req, err = http.NewRequest(method, base+path, bytes.NewReader(body))
+	} else {
+		req, err = http.NewRequest(method, base+path, nil)
+	}
+	if err != nil {
+		writeError(w, 500, err.Error())
 		return
 	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		writeError(w, 502, "代理池服务不可用（zcode-relay 没起？）："+err.Error())
 		return
@@ -787,6 +776,35 @@ func (s *Server) handleProxies(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
+}
+
+// handleProxies：代理池的列表 / 批量添加 / 删除。
+func (s *Server) handleProxies(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.relayRequest(w, http.MethodGet, "/proxies", nil)
+	case http.MethodPost:
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		s.relayRequest(w, http.MethodPost, "/proxies", body)
+	case http.MethodDelete:
+		addr := r.URL.Query().Get("addr")
+		s.relayRequest(w, http.MethodDelete, "/proxies?addr="+url.QueryEscape(addr), nil)
+	default:
+		writeError(w, 405, "method not allowed")
+	}
+}
+
+// handleProxySettings：体检间隔与"连续失败几次自动删除"。
+func (s *Server) handleProxySettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.relayRequest(w, http.MethodGet, "/settings", nil)
+	case http.MethodPost:
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		s.relayRequest(w, http.MethodPost, "/settings", body)
+	default:
+		writeError(w, 405, "method not allowed")
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

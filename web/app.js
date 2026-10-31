@@ -707,6 +707,9 @@ async function loadProxies() {
   try {
     const data = await api('/api/proxies');
     state.proxies = data;
+    const s = data.settings || {};
+    if ($('proxy-health-sec')) $('proxy-health-sec').value = s.health_sec || 600;
+    if ($('proxy-delete-after')) $('proxy-delete-after').value = s.delete_after === 0 ? 0 : (s.delete_after || 3);
     renderProxies();
   } catch (error) {
     if (box) box.innerHTML = `<div class="muted">代理池不可用：${esc(error.message)}</div>`;
@@ -725,6 +728,8 @@ function renderProxies() {
     <div class="proxy-row">
       <span class="dot ${p.healthy ? 'ok' : 'bad'}"></span>
       <code>${esc(p.addr)}</code>
+      <span class="tag">${esc(p.scheme || 'https')}</span>
+      ${p.failStreak ? `<span class="tag warn">失败 ${p.failStreak}</span>` : ''}
       ${p.current ? '<span class="tag info">当前出口</span>' : ''}
       ${p.healthy ? '' : '<span class="tag bad">不可用</span>'}
       <button class="btn ghost" data-proxy-del="${esc(p.addr)}">删除</button>
@@ -761,6 +766,24 @@ async function deleteProxy(addr) {
     await api(`/api/proxies?addr=${encodeURIComponent(addr)}`, { method: 'DELETE' });
     await loadProxies();
   } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+async function saveProxySettings() {
+  const status = $('proxy-settings-status');
+  try {
+    const res = await api('/api/proxies/settings', {
+      method: 'POST',
+      body: JSON.stringify({
+        health_sec: Number($('proxy-health-sec').value) || 600,
+        delete_after: Number($('proxy-delete-after').value) || 0,
+      }),
+    });
+    status.textContent = `已保存：每 ${res.health_sec}s 复检，连续失败 ${res.delete_after} 次删除`;
+    await loadProxies();
+  } catch (error) {
+    status.textContent = '';
     toast(error.message, true);
   }
 }
@@ -1014,6 +1037,7 @@ if ($('theme-toggle')) {
 // 代理池操作
 if ($('proxy-add')) $('proxy-add').addEventListener('click', addProxies);
 if ($('proxy-reload')) $('proxy-reload').addEventListener('click', loadProxies);
+if ($('proxy-save-settings')) $('proxy-save-settings').addEventListener('click', saveProxySettings);
 
 // Initial load + 30s polling.
 loadOverview();

@@ -413,3 +413,6 @@ html[data-theme="dark"] .icon-btn:hover { background: rgba(255, 255, 255, 0.08);
 .proxy-row code { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .proxy-row .btn { padding: 2px 8px; font-size: 12px; }
 html[data-theme="dark"] .proxy-row { border-bottom-color: rgba(255, 255, 255, 0.06); }
+.proxy-tuning { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+.proxy-tuning .field { margin: 0; }
+.proxy-tuning .input { width: 130px; }
