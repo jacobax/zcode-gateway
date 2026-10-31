@@ -28,6 +28,8 @@
   ZC_REQUIRE_CLAIMABLE  1 = 只领 preview 标记可领的（默认 0）
   ZC_RETRY_SKIP_HOURS   失败缓存有效期，默认 6（1001–1005 与 3012 都缓存）
   ZC_CLAIM_GAP_SEC      两次领取之间的间隔秒数，默认 15（防 3012 风控）
+  ZC_RELAY_ROTATE_URL   本地中继的换 IP 接口，如 http://127.0.0.1:3129/rotate
+                        （设了就在每次 claim 前换一个出口；见 contrib/relay）
   ZC_AUTO_MANAGE        1 = 按额度自动启停（默认 1，旧名 ZC_AUTO_ENABLE 仍可用）
   ZC_EMPTY_ROUNDS       连续几轮无额度才禁用，默认 2
   ZC_DISABLED_MARKER    额外认这个 lastError 标记的禁用号（默认「迁移时停用」）
@@ -49,6 +51,8 @@ MAX_SOLVES = int(os.environ.get("ZC_MAX_SOLVES", "8"))
 SOLVER_TIMEOUT = int(os.environ.get("ZC_SOLVER_TIMEOUT", "120"))
 REQUIRE_CLAIMABLE = os.environ.get("ZC_REQUIRE_CLAIMABLE", "0") == "1"
 CLAIM_GAP_SEC = float(os.environ.get("ZC_CLAIM_GAP_SEC", "15"))
+# 每次 claim 之前让本地中继换一个出口 IP（中继的 GET /rotate）
+RELAY_ROTATE_URL = os.environ.get("ZC_RELAY_ROTATE_URL", "")
 AUTO_MANAGE = os.environ.get("ZC_AUTO_MANAGE", os.environ.get("ZC_AUTO_ENABLE", "1")) == "1"
 EMPTY_ROUNDS = max(1, int(os.environ.get("ZC_EMPTY_ROUNDS", "2")))
 DISABLED_MARKER = os.environ.get("ZC_DISABLED_MARKER", "迁移时停用")
@@ -146,6 +150,18 @@ def solve_captcha(scene, region, prefix):
     tail = (p.stdout or "")[-160:].replace("\n", " ") + (p.stderr or "")[-160:].replace("\n", " ")
     say(f"    求解失败 exit={p.returncode} {tail}")
     return None
+
+
+def rotate_relay():
+    """让本地中继换一个出口 IP；没配就什么都不做。"""
+    if not RELAY_ROTATE_URL:
+        return
+    try:
+        with urllib.request.urlopen(RELAY_ROTATE_URL, timeout=8) as r:
+            ip = r.read().decode("utf-8", "replace").strip()
+        say(f"    领取出口已切换 → {ip}")
+    except Exception as e:
+        say(f"    WARN: 切换出口失败 {e}")
 
 
 QUOTA_STATE_FILE = os.path.join(STATE_DIR, "quota_state.json")
@@ -328,6 +344,7 @@ def main():
         if param:
             body["captchaVerifyParam"] = param
             body["captchaRegion"] = region
+        rotate_relay()
         st, res = api("POST", f"/api/accounts/{aid}/claim", body, timeout=120)
         code = res.get("code")
         if st == 200 and res.get("ok"):

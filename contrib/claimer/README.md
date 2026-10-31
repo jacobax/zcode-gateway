@@ -76,6 +76,7 @@ pe 虚拟机上会 stall（实测 `[pe-stall] pe.075.…`，退出码 2）。真
 | `ZC_REQUIRE_CLAIMABLE` | `0` | `1` = 只领 preview 标 `claimable=true` 的项 |
 | `ZC_RETRY_SKIP_HOURS` | `6` | 失败缓存有效期（1001–1005 与 3012 都缓存） |
 | `ZC_CLAIM_GAP_SEC` | `15` | 两次领取之间的间隔秒数；同一个出口 IP 连续领很容易吃 3012 |
+| `ZC_RELAY_ROTATE_URL` | 空 | 本地中继的 `/rotate` 地址；设了就在每次 claim 前换一个出口 IP |
 | `ZC_AUTO_MANAGE` | `1` | 按额度自动启停（旧名 `ZC_AUTO_ENABLE` 仍可用） |
 | `ZC_EMPTY_ROUNDS` | `2` | 连续几轮查不到额度才禁用 |
 

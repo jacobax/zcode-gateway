@@ -1,0 +1,20 @@
+[Unit]
+Description=zcode-relay - 把 TLS 包装的住宅代理转成网关可用的明文 HTTP 代理
+Documentation=https://github.com/jacobax/zcode-gateway/blob/main/contrib/relay/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=RELAY_LISTEN=127.0.0.1:3129
+Environment=RELAY_POOL=/etc/zcode-relay/proxies.txt
+Environment=RELAY_TTL_SEC=3000
+Environment=RELAY_HEALTH_SEC=600
+ExecStart=/usr/bin/python3 /opt/zcode-relay/relay.py
+Restart=always
+RestartSec=5
+Nice=10
+SyslogIdentifier=zcode-relay
+
+[Install]
+WantedBy=multi-user.target

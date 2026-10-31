@@ -9,6 +9,7 @@ systemd 单元与自动更新脚本，配套 `OPERATIONS.md` 使用。以下路�
 | `zcode-gateway-autoupdate.service` / `.timer` | 同上 | 每天 05:50（北京时间）从本仓库 `main` 拉代码、编译、换二进制 |
 | `zcode-gateway-autoupdate.sh` | `/usr/local/bin/` | 上面的 service 实际执行的脚本 |
 | `zcode-claimer.service` / `.timer` | `/etc/systemd/system/` | 套餐自动领取 sidecar，每小时 :17 一轮 |
+| `zcode-relay.service` | 同上 | 领取流量用的住宅代理中继（见 `contrib/relay/`），监听 `127.0.0.1:3129` |
 
 ## 安装
 

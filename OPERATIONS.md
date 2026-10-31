@@ -95,42 +95,42 @@ git fetch origin main → 比对 VERSION 里的 commit → 备份 data/旧二进
 
 ## 出口 IP 与风控
 
-上游的 `3012 账号或者网络环境存在异常` 是按**出口 IP** 判的：同一台机器、同一个 IP
-连续领取多个账号，领到第 6～8 个就开始被拒。脚本侧的限速/熔断/缓存只能缓解，
-要根治得让每个账号（或每轮）从不同 IP 出去。
+上游的 `3012 账号或者网络环境存在异常` 是按**出口 IP** 判的：同一个 IP 连续领取多个账号，
+领到第 5～8 个就开始被拒。脚本侧的限速/熔断/缓存只能缓解，根治要换出口。
 
-网关本身只支持一个全局上游代理（`ZCODE_PROXY_URL` / `ZCODE_PROXY`，支持
-`http`/`https`/`socks5`/`socks5h`），见 `upstream.go`。所以思路是给它挂一个
-**能按用户名切换出口地址的代理池**：
+### 走过的弯路（别再试）
+
+| 方案 | 为什么不行 |
+|---|---|
+| HE IPv6 隧道池（he-ipv6-pool） | **`zcode.z.ai` 没有 AAAA 记录**，只监听 IPv4，IPv6 出口根本到不了。实测 `getent ahostsv6` 无记录、`curl -6` 返回 000 |
+| WARP | 出口是 Cloudflare 的一个共享机房 IP，换门牌不换结构；机房段还更容易被判成代理 |
+| 把 `https://` 住宅代理直接填进 `ZCODE_PROXY_URL` | tls-client 在**代理拨号**阶段校验证书，自签且无 IP SAN 会直接失败；`WithInsecureSkipVerify` 只作用于上游 TLS，救不了这一段 |
+
+### 实际采用：本地中继 + 住宅代理池
 
 ```
-[he-ipv6-pool](https://github.com/x6nux/he-ipv6-pool)
-  一条免费 HE IPv6 隧道 → SOCKS5/HTTP 代理池，出口地址由代理用户名后缀决定
-  例：alice-ttl-15m-cidr-64 → 每 15 分钟换一个地址，且每次换到不同的 /64
+网关 ──明文 CONNECT──► 127.0.0.1:3129（zcode-relay）──TLS(不校验证书)──► 住宅代理 ──► zcode.z.ai
 ```
 
-接法（在网关的 systemd 单元里加一行）：
+- `contrib/relay/` 是中继：对网关是明文 HTTP 代理，对上游代理做 TLS 并跳过证书校验；
+  启动和每 10 分钟体检一次，按 TTL 轮换，`GET /rotate` 可按需换 IP
+- 网关侧加 `ZCODE_PROXY_URL_CLAIM=http://127.0.0.1:3129`，
+  **只有 billing / marketing / claim 走中继**，模型请求和额度刷新保持直连
+- 领取脚本加 `ZC_RELAY_ROTATE_URL=http://127.0.0.1:3129/rotate`，每次 claim 前换一个出口
 
-```ini
-Environment=ZCODE_PROXY_URL=socks5h://alice-ttl-15m-cidr-64:<密码>@127.0.0.1:24601
-```
+代理池在 `/etc/zcode-relay/proxies.txt`，一行一个 `host:port`（支持 `user:pass@host:port`）。
+这批是开放代理，随时会挂——中继的体检会剔除失效的，全挂了就回 502，那一轮放弃、下一轮再来。
 
-前置条件与代价：
-
-- 需要一个 HE 隧道（`tunnelbroker.net` 免费注册），VPS 的公网 IPv4 要能被 HE ping 通，
-  AWS 安全组要放行**协议 41**（入站）和代理端口（回环可不开）
-- **所有上游流量都会走这个代理**——不只是领取，还有模型请求和额度刷新。好处是 IP 轮换，
-  代价是多一跳 HE 隧道（亚洲机建议选美西节点，RTT 增加约 150～250ms）以及免费隧道的抖动
-- 代理挂了网关就完全打不到上游。排查时先把它摘掉：
-  `systemctl edit zcode-gateway` 里置空 `ZCODE_PROXY_URL` 再 `restart`
+回退：删掉 `/etc/systemd/system/zcode-gateway.service.d/claim-proxy.conf` 再 restart，
+网关就回到全部直连。
 
 验证出口确实在变：
 
 ```bash
-curl -s -x socks5h://alice-ttl-1m-cidr-64:<密码>@127.0.0.1:24601 https://ipv6.icanhazip.com
-# 隔一分钟再跑一次，应该拿到不同的地址（且不在同一个 /64）
+curl -s -x http://127.0.0.1:3129 https://api.ipify.org   # 住宅代理的 IP
+curl -s http://127.0.0.1:3129/rotate                      # 换一个
+curl -s -x http://127.0.0.1:3129 https://api.ipify.org   # 应该变了
 ```
-
 ## 回滚
 
 ```bash
