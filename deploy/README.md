@@ -3,6 +3,28 @@
 systemd 单元与自动更新脚本，配套 `OPERATIONS.md` 使用。以下路径是脚本的硬编码约定，
 改路径要同时改单元文件和脚本。
 
+## 从 Release 包部署（推荐）
+
+每个 release 的 tar.gz / zip 里已经有**完整可部署内容**：
+
+```
+zcode-gateway              二进制（含所有本地补丁）
+README.md / OPERATIONS.md  运维文档
+config.example.yaml        配置模板
+contrib/relay/             领取流量用的代理中继
+contrib/claimer/           套餐自动领取脚本
+deploy/                    systemd 单元 + 自动更新脚本
+```
+
+```bash
+tar xzf zcode-gateway_<版本>_linux_amd64.tar.gz -C /opt/zcode-gateway
+cd /opt/zcode-gateway && cp config.example.yaml config.yaml
+# 然后按下面的表格装 systemd 单元
+```
+
+注意：`contrib/claimer` 还缺验证码求解器（第三方代码，不随仓库分发），
+按 `contrib/claimer/README.md` 自行放置。
+
 | 文件 | 安装到 | 作用 |
 |---|---|---|
 | `zcode-gateway.service` | `/etc/systemd/system/` | 网关本体（`127.0.0.1:3000`，数据在 `/opt/zcode-gateway/data`） |

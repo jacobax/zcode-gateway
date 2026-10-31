@@ -68,7 +68,9 @@ jobs:
           if [ "$GOOS" = "windows" ]; then BIN=zcode-gateway.exe; fi
           mkdir -p pkg
           go build -trimpath -ldflags="-s -w" -o "pkg/$BIN" .
-          cp README.md pkg/README.md
+          # 打包完整可部署内容：二进制 + 中继/领取脚本 + systemd 单元 + 运维文档
+          cp README.md OPERATIONS.md config.example.yaml pkg/
+          cp -r contrib deploy pkg/
           if [ "$GOOS" = "windows" ]; then
             (cd pkg && zip -qr "../zcode-gateway_${VERSION}_${GOOS}_${GOARCH}.zip" .)
           else
