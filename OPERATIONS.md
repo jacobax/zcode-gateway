@@ -65,13 +65,6 @@ zcode-claimer.timer（每小时 :17）──► 面板管理接口 ──► 上
 - 手动触发：`systemctl start zcode-gateway-autoupdate.service`
 - 强制重装当前版本：`FORCE_REINSTALL=1 /usr/local/bin/zcode-gateway-autoupdate.sh`
 - 只替换二进制和文档，**不碰** `/opt/zcode-relay`、`/opt/zcode-claimer`（独立部署，可能有本地改动）
-PUT >94:
-
-9. **首次启动会自动导入桌面端账号**。`store.go` 的 `NewStore()` 在账号表为空时调用
-   `ImportDesktop()`，读 `~/.zcode/v2/credentials.json`（ZCode 桌面端登录凭据）解密后
-   写入 `data/accounts.json`。所以在装了桌面端并登录过的机器上跑一个全新的二进制，
-   面板里会直接出现本机账号——这是上游行为，不是发布包里带了数据。日志会打一行
-   `已从桌面端导入 N 个账号（来源 …）`；没有凭据时打 `未发现桌面端凭据 …，跳过自动导入`。
 
 ## 面板密码与并发
 
@@ -174,6 +167,17 @@ PUT >94:
    写入 `data/accounts.json`。所以在装了桌面端并登录过的机器上跑一个全新的二进制，
    面板里会直接出现本机账号——这是上游行为，不是发布包里带了数据。日志会打一行
    `已从桌面端导入 N 个账号（来源 …）`；没有凭据时打 `未发现桌面端凭据 …，跳过自动导入`。
+
+10. **客户端版本不能盲目跟进**。2026-10-31 试过把 `ZCODE_APP_VERSION` 从 3.16.3 提到官方桌面端
+    当时的 3.17.1：同一个账号先用 3.16.3 发请求正常，隔 30 秒换 3.17.1 立刻被上游回
+    `3012 request has been blocked due to unusual activity`，换回 3.16.3 又恢复正常。
+    也就是说版本号本身是上游的校验项，**不是越新越好**。升级流程：
+
+    1. 复制一份 `data/` 到临时目录，只保留一个健康账号（其余 `enabled=false`）；
+    2. 用新版本跑临时实例（换端口），发一次真实请求；
+    3. 通过才改 `runtime.go` 的默认值；失败就保持原版本。
+
+    务必只留一个号：网关的重试循环会把 3012 扩散到池子里的其他账号。
 
 ## 出口 IP 与风控
 

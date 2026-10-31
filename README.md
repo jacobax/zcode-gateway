@@ -86,7 +86,7 @@ go build -trimpath -ldflags="-s -w" -o zcode-gateway .
 | `ZCODE_GATEWAY_ADDR` | `127.0.0.1:8787` | 监听地址，生产建议只绑回环 |
 | `ZCODE_GATEWAY_DATA` | `data` | 数据目录（`accounts.json`、`master.key`、`gateway.db`） |
 | `ZCODE_ADMIN_PASSWORD` | 随机生成 | 面板密码**初始值**；面板里改过后以面板为准 |
-| `ZCODE_APP_VERSION` | `3.16.3` | 模拟的 ZCode 客户端版本（影响 UA 与身份头） |
+| `ZCODE_APP_VERSION` | `3.16.3` | 模拟的 ZCode 客户端版本（UA 与 `X-ZCode-App-Version` 等身份头都取它）。**升级前必须做单账号 A/B 验证**，见 `OPERATIONS.md` 第 10 条坑 |
 | `ZCODE_UPSTREAM` | `https://zcode.z.ai` | 上游地址 |
 | `ZCODE_PROXY_URL` | 空 | 全局出口代理（http/https/socks5） |
 | `ZCODE_PROXY_URL_CLAIM` | 空 | 只给领取/活动用的出口（通常指向本地中继） |
