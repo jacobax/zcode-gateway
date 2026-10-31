@@ -232,6 +232,23 @@
           <div class="info-row"><span>版本</span><code id="setting-version">-</code></div>
           <div class="info-row"><span>数据目录</span><code id="setting-datadir">-</code></div>
         </div>
+        <div class="card">
+          <div class="card-head">
+            <div><div class="card-kicker">领取代理池</div><h2>住宅代理</h2></div>
+            <button class="btn ghost" id="proxy-reload">刷新列表</button>
+          </div>
+          <label class="field">
+            <span>添加代理（一行一个，支持 host:port / https://host:port / user:pass@host:port）</span>
+            <textarea class="input mono" id="proxy-input" rows="3" spellcheck="false"
+              placeholder="93.42.177.250:443&#10;83.206.1.225:8090&#10;user:pass@proxy.example.com:1443"></textarea>
+            <div class="token-row">
+              <button class="btn primary" id="proxy-add">验证并添加</button>
+              <span class="muted" id="proxy-add-status"></span>
+            </div>
+            <small>逐条验证：TLS 连上后 CONNECT zcode.z.ai:443，通过的才写入池子；中继每 10 分钟自动复检。</small>
+          </label>
+          <div class="proxy-list" id="proxy-list"></div>
+        </div>
       </div>
     </section>
   </main>

@@ -50,6 +50,7 @@ func main() {
 	mux.HandleFunc("/api/logs", server.requireAdmin(server.handleLogs))
 	mux.HandleFunc("/api/logs/", server.requireAdmin(server.handleLogs))
 	mux.HandleFunc("/api/settings", server.requireAdmin(server.handleSettings))
+	mux.HandleFunc("/api/proxies", server.requireAdmin(server.handleProxies))
 	mux.HandleFunc("/v1/messages", server.handleMessages)
 	mux.HandleFunc("/v1/models", server.handleModels)
 	mux.HandleFunc("/health", server.handleHealth)

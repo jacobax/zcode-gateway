@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"bufio"
 	"context"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -740,6 +742,51 @@ func writeUpstreamError(w http.ResponseWriter, status int, body []byte) {
 
 func decodeJSON(r *http.Request, target any) error {
 	return json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(target)
+
+// handleProxies 把面板里的代理池操作转发给本地中继（contrib/relay 的管理口）。
+// 中继只监听回环，网关是它唯一入口，所以鉴权沿用面板登录态。
+func (s *Server) handleProxies(w http.ResponseWriter, r *http.Request) {
+	base := envOr("ZCODE_RELAY_ADMIN", "http://127.0.0.1:3129")
+	client := &http.Client{Timeout: 120 * time.Second}
+	var (
+		resp *http.Response
+		err  error
+	)
+	switch r.Method {
+	case http.MethodGet:
+		resp, err = client.Get(base + "/proxies")
+	case http.MethodPost:
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		var req *http.Request
+		req, err = http.NewRequest(http.MethodPost, base+"/proxies", bytes.NewReader(body))
+		if err != nil {
+			writeError(w, 500, err.Error())
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err = client.Do(req)
+	case http.MethodDelete:
+		addr := r.URL.Query().Get("addr")
+		var req *http.Request
+		req, err = http.NewRequest(http.MethodDelete, base+"/proxies?addr="+url.QueryEscape(addr), nil)
+		if err != nil {
+			writeError(w, 500, err.Error())
+			return
+		}
+		resp, err = client.Do(req)
+	default:
+		writeError(w, 405, "method not allowed")
+		return
+	}
+	if err != nil {
+		writeError(w, 502, "代理池服务不可用（zcode-relay 没起？）："+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
+}
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

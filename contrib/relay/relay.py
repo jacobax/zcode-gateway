@@ -13,8 +13,12 @@
   - 按 TTL 轮换出口（默认 50 分钟），轮换时断开已有隧道
   - 每 HEALTH_INTERVAL 秒重新体检；体检方式是 TLS 连上后 CONNECT zcode.z.ai:443 看回 200
   - 单个隧道失败会自动换下一个健康代理重试（最多 3 次），全失败回 502
-  - 控制口：`GET /rotate`（仅回环）立即换一个出口并断开现有隧道，
-    领取脚本在每次 claim 之前调它，做到"一次领取一个 IP"
+
+管理接口（都只允许回环访问）：
+  GET    /rotate            立即换一个出口，返回新的 host:port
+  GET    /proxies           列出池子：地址 / 是否健康 / 是否当前出口
+  POST   /proxies           {"addrs":["host:port", ...]} 逐条验证，通过的写回池文件
+  DELETE /proxies?addr=…    从池子里删掉一条
 
 环境变量：
   RELAY_LISTEN     默认 127.0.0.1:3129
@@ -25,6 +29,7 @@
 """
 import asyncio
 import base64
+import json
 import os
 import random
 import ssl
@@ -44,9 +49,11 @@ ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 ssl_ctx.check_hostname = False
 ssl_ctx.verify_mode = ssl.CERT_NONE
 
-healthy = []          # [(host, port, auth_header)]
-current = None        # 当前使用的上游
-tunnels = set()       # 活跃隧道，轮换时断开
+pool = []             # [(host, port, auth_header)]
+healthy = []
+current = None
+tunnels = set()
+pool_lock = asyncio.Lock()
 
 
 def log(msg):
@@ -59,27 +66,59 @@ def log(msg):
         pass
 
 
+def entry_addr(entry):
+    host, port, _ = entry
+    return f"{host}:{port}"
+
+
+def parse_entry(raw):
+    """把一行解析成 (host, port, auth)；不合法返回 None。"""
+    raw = (raw or "").strip()
+    if not raw or raw.startswith("#"):
+        return None
+    raw = raw.split("#", 1)[0].strip()
+    if raw.startswith("http://") or raw.startswith("https://"):
+        raw = raw.split("://", 1)[1]
+    raw = raw.rstrip("/")
+    auth = None
+    if "@" in raw:
+        cred, _, raw = raw.rpartition("@")
+        auth = "Basic " + base64.b64encode(cred.encode()).decode()
+    host, _, port = raw.rpartition(":")
+    if not host or not port.isdigit() or not (0 < int(port) < 65536):
+        return None
+    return host, int(port), auth
+
+
 def load_pool():
     out = []
     try:
         for raw in open(POOL_FILE, encoding="utf-8"):
-            raw = raw.strip()
-            if not raw or raw.startswith("#"):
-                continue
-            raw = raw.split("#", 1)[0].strip()
-            if raw.startswith("http://") or raw.startswith("https://"):
-                raw = raw.split("://", 1)[1]
-            auth = None
-            if "@" in raw:
-                cred, _, raw = raw.rpartition("@")
-                auth = "Basic " + base64.b64encode(cred.encode()).decode()
-            host, _, port = raw.rpartition(":")
-            if not host or not port.isdigit():
-                continue
-            out.append((host, int(port), auth))
+            e = parse_entry(raw)
+            if e:
+                out.append(e)
     except FileNotFoundError:
         log(f"ERROR: 找不到代理池文件 {POOL_FILE}")
     return out
+
+
+def save_pool():
+    """把当前池子写回文件（保留 user:pass@ 形式）。"""
+    lines = []
+    for host, port, auth in pool:
+        if auth:
+            cred = base64.b64decode(auth.split(" ", 1)[1]).decode()
+            lines.append(f"{cred}@{host}:{port}")
+        else:
+            lines.append(f"{host}:{port}")
+    try:
+        tmp = POOL_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, POOL_FILE)
+    except Exception as e:
+        log(f"WARN: 写回代理池失败 {e}")
 
 
 async def try_upstream(entry, target_host, target_port):
@@ -111,14 +150,15 @@ async def try_upstream(entry, target_host, target_port):
         return None
 
 
-async def check_one(entry):
+async def check_entry(entry):
+    t0 = time.time()
     target_host, _, target_port = CHECK_TARGET.rpartition(":")
     r = await try_upstream(entry, target_host, int(target_port))
     if r:
         _, w = r
         w.close()
-        return True
-    return False
+        return True, int((time.time() - t0) * 1000)
+    return False, int((time.time() - t0) * 1000)
 
 
 def rotate_now(reason="按 TTL"):
@@ -128,7 +168,7 @@ def rotate_now(reason="按 TTL"):
         return None
     nxt = random.choice([e for e in healthy if e != current] or healthy)
     current = nxt
-    log(f"轮换出口（{reason}）→ {current[0]}:{current[1]}，断开 {len(tunnels)} 条隧道")
+    log(f"轮换出口（{reason}）→ {entry_addr(current)}，断开 {len(tunnels)} 条隧道")
     for t in list(tunnels):
         try:
             t.close()
@@ -139,18 +179,21 @@ def rotate_now(reason="按 TTL"):
 
 
 async def health_loop():
-    global healthy, current
+    global pool, healthy, current
     pool = load_pool()
     log(f"代理池 {len(pool)} 条，开始体检（目标 {CHECK_TARGET}）")
-    results = await asyncio.gather(*[check_one(e) for e in pool])
-    healthy = [e for e, ok in zip(pool, results) if ok]
+    results = await asyncio.gather(*[check_entry(e) for e in pool])
+    healthy = [e for e, (ok, _) in zip(pool, results) if ok]
     log(f"体检完成：健康 {len(healthy)}/{len(pool)}")
-    if healthy:
+    if healthy and current is None:
         rotate_now("首次选择")
     while True:
         await asyncio.sleep(HEALTH_SEC)
-        results = await asyncio.gather(*[check_one(e) for e in pool])
-        healthy = [e for e, ok in zip(pool, results) if ok]
+        async with pool_lock:
+            snapshot = list(pool)
+        results = await asyncio.gather(*[check_entry(e) for e in snapshot])
+        async with pool_lock:
+            healthy = [e for e, (ok, _) in zip(snapshot, results) if ok]
         log(f"复检完成：健康 {len(healthy)}/{len(pool)}")
         if not healthy:
             current = None
@@ -184,6 +227,93 @@ def is_loopback(writer):
     return bool(peer) and peer[0] in ("127.0.0.1", "::1")
 
 
+async def send_json(writer, status, payload):
+    body = json.dumps(payload, ensure_ascii=False).encode()
+    head = (f"HTTP/1.1 {status}\r\nContent-Type: application/json; charset=utf-8\r\n"
+            f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n").encode()
+    try:
+        writer.write(head + body)
+        await writer.drain()
+    except Exception:
+        pass
+    try:
+        writer.close()
+    except Exception:
+        pass
+
+
+async def handle_admin(method, path, query, body, writer):
+    """返回 True 表示已处理。"""
+    global pool, healthy, current
+
+    if path == "/rotate":
+        entry = rotate_now("脚本请求")
+        await send_json(writer, "200 OK", {"current": entry_addr(entry) if entry else None})
+        return True
+
+    if path == "/proxies":
+        if method == "GET":
+            cur = entry_addr(current) if current else None
+            hset = {entry_addr(e) for e in healthy}
+            items = [{"addr": entry_addr(e), "healthy": entry_addr(e) in hset,
+                      "current": entry_addr(e) == cur} for e in pool]
+            await send_json(writer, "200 OK", {"current": cur, "total": len(items), "items": items})
+            return True
+
+        if method == "POST":
+            try:
+                payload = json.loads(body or b"{}")
+            except Exception:
+                await send_json(writer, "400 Bad Request", {"error": "invalid json"})
+                return True
+            addrs = payload.get("addrs") or []
+            if isinstance(addrs, str):
+                addrs = [addrs]
+            results = []
+            async with pool_lock:
+                existing = {entry_addr(e) for e in pool}
+            for raw in addrs[:200]:
+                entry = parse_entry(raw)
+                if not entry:
+                    results.append({"addr": str(raw)[:80], "ok": False, "error": "格式不合法"})
+                    continue
+                addr = entry_addr(entry)
+                if addr in existing:
+                    results.append({"addr": addr, "ok": True, "error": "已存在"})
+                    continue
+                ok, ms = await check_entry(entry)
+                if not ok:
+                    results.append({"addr": addr, "ok": False, "error": "验证失败（连接/证书/CONNECT）"})
+                    continue
+                async with pool_lock:
+                    pool.append(entry)
+                    healthy.append(entry)
+                existing.add(addr)
+                results.append({"addr": addr, "ok": True, "latencyMs": ms})
+                log(f"新增代理 {addr}（{ms}ms）")
+            async with pool_lock:
+                save_pool()
+            await send_json(writer, "200 OK", {"results": results})
+            return True
+
+        if method == "DELETE":
+            addr = (query.get("addr") or [""])[0].strip()
+            if not addr:
+                await send_json(writer, "400 Bad Request", {"error": "缺少 addr"})
+                return True
+            async with pool_lock:
+                pool = [e for e in pool if entry_addr(e) != addr]
+                healthy = [e for e in healthy if entry_addr(e) != addr]
+                save_pool()
+            if current and entry_addr(current) == addr:
+                rotate_now("当前出口被删除")
+            log(f"删除代理 {addr}")
+            await send_json(writer, "200 OK", {"ok": True})
+            return True
+
+    return False
+
+
 async def handle(client_reader, client_writer):
     try:
         head = await asyncio.wait_for(client_reader.readuntil(b"\r\n\r\n"), timeout=15)
@@ -195,35 +325,31 @@ async def handle(client_reader, client_writer):
     if len(parts) < 2:
         client_writer.close()
         return
+    method = parts[0].upper()
+    path, _, qs = parts[1].partition("?")
+    query = {}
+    for kv in qs.split("&"):
+        if "=" in kv:
+            k, _, v = kv.partition("=")
+            query.setdefault(k, []).append(v)
 
-    # 控制口：立即换出口（只允许回环）
-    if parts[0].upper() == "GET" and parts[1] == "/rotate":
+    if method != "CONNECT":
         if not is_loopback(client_writer):
-            client_writer.write(b"HTTP/1.1 403 Forbidden\r\n\r\n")
-            try:
-                await client_writer.drain()
-            except Exception:
-                pass
-            client_writer.close()
+            await send_json(client_writer, "403 Forbidden", {"error": "只允许回环访问"})
             return
-        entry = rotate_now("脚本请求")
-        body = (f"{entry[0]}:{entry[1]}".encode() if entry else b"none")
-        client_writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: "
-                            + str(len(body)).encode() + b"\r\n\r\n" + body)
-        try:
-            await client_writer.drain()
-        except Exception:
-            pass
-        client_writer.close()
-        return
-
-    if parts[0].upper() != "CONNECT":
-        client_writer.write(b"HTTP/1.1 405 Method Not Allowed\r\n\r\n")
-        try:
-            await client_writer.drain()
-        except Exception:
-            pass
-        client_writer.close()
+        body = b""
+        if method in ("POST", "PUT"):
+            try:
+                clen = 0
+                for line in head.split(b"\r\n"):
+                    if line.lower().startswith(b"content-length:"):
+                        clen = int(line.split(b":", 1)[1].strip())
+                body = await asyncio.wait_for(client_reader.read(clen), timeout=10) if clen else b""
+            except Exception:
+                body = b""
+        if await handle_admin(method, path, query, body, client_writer):
+            return
+        await send_json(client_writer, "405 Method Not Allowed", {"error": "unsupported"})
         return
 
     target_host, _, target_port = parts[1].rpartition(":")
@@ -245,7 +371,7 @@ async def handle(client_reader, client_writer):
             up_writer.close()
             return
         tunnels.add(client_writer)
-        log(f"隧道 {entry[0]}:{entry[1]} → {target_host}:{target_port}")
+        log(f"隧道 {entry_addr(entry)} → {target_host}:{target_port}")
         try:
             await asyncio.gather(pipe(client_reader, up_writer), pipe(up_reader, client_writer))
         finally:

@@ -12,6 +12,7 @@ const state = {
   logFilter: { status: '', account: '' },
   activityAccountId: null,
   activityCaptcha: null,
+  proxies: null,
 };
 
 const numberFmt = new Intl.NumberFormat('zh-CN');
@@ -121,7 +122,7 @@ function setView(view) {
   $('page-title').textContent = titles[view][0];
   $('page-subtitle').textContent = titles[view][1];
   if (view === 'logs') loadLogs();
-  if (view === 'settings') loadSettings();
+  if (view === 'settings') { loadSettings(); loadProxies(); }
 }
 
 async function loadOverview() {
@@ -700,6 +701,70 @@ async function loadSettings() {
   }
 }
 
+// ---------- 领取代理池 ----------
+async function loadProxies() {
+  const box = $('proxy-list');
+  try {
+    const data = await api('/api/proxies');
+    state.proxies = data;
+    renderProxies();
+  } catch (error) {
+    if (box) box.innerHTML = `<div class="muted">代理池不可用：${esc(error.message)}</div>`;
+  }
+}
+
+function renderProxies() {
+  const box = $('proxy-list');
+  if (!box) return;
+  const items = (state.proxies && state.proxies.items) || [];
+  if (!items.length) {
+    box.innerHTML = '<div class="muted">池子是空的，先加几条。</div>';
+    return;
+  }
+  box.innerHTML = items.map((p) => `
+    <div class="proxy-row">
+      <span class="dot ${p.healthy ? 'ok' : 'bad'}"></span>
+      <code>${esc(p.addr)}</code>
+      ${p.current ? '<span class="tag info">当前出口</span>' : ''}
+      ${p.healthy ? '' : '<span class="tag bad">不可用</span>'}
+      <button class="btn ghost" data-proxy-del="${esc(p.addr)}">删除</button>
+    </div>`).join('');
+  box.querySelectorAll('[data-proxy-del]').forEach((btn) => {
+    btn.addEventListener('click', () => deleteProxy(btn.dataset.proxyDel));
+  });
+}
+
+async function addProxies() {
+  const raw = $('proxy-input').value || '';
+  const addrs = raw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  if (!addrs.length) return;
+  const status = $('proxy-add-status');
+  status.textContent = `验证中（${addrs.length} 条）…`;
+  try {
+    const res = await api('/api/proxies', { method: 'POST', body: JSON.stringify({ addrs }) });
+    const results = res.results || [];
+    const ok = results.filter((r) => r.ok).length;
+    const bad = results.length - ok;
+    status.textContent = `成功 ${ok} 条${bad ? `，失败 ${bad} 条` : ''}`;
+    const fails = results.filter((r) => !r.ok).map((r) => `${r.addr}：${r.error}`).join('；');
+    if (fails) toast(fails.slice(0, 220), true);
+    $('proxy-input').value = '';
+    await loadProxies();
+  } catch (error) {
+    status.textContent = '';
+    toast(error.message, true);
+  }
+}
+
+async function deleteProxy(addr) {
+  try {
+    await api(`/api/proxies?addr=${encodeURIComponent(addr)}`, { method: 'DELETE' });
+    await loadProxies();
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
 async function saveSettings() {
   try {
     const body = {
@@ -945,6 +1010,10 @@ if ($('theme-toggle')) {
     applyTheme(next);
   });
 }
+
+// 代理池操作
+if ($('proxy-add')) $('proxy-add').addEventListener('click', addProxies);
+if ($('proxy-reload')) $('proxy-reload').addEventListener('click', loadProxies);
 
 // Initial load + 30s polling.
 loadOverview();
