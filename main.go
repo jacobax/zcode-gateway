@@ -43,6 +43,8 @@ func main() {
 	mux.HandleFunc("/api/overview", server.requireAdmin(server.handleOverview))
 	mux.HandleFunc("/api/accounts", server.requireAdmin(server.handleAccounts))
 	mux.HandleFunc("/api/accounts/import", server.requireAdmin(server.handleImport))
+	mux.HandleFunc("/api/accounts/export", server.requireAdmin(server.handleExportAccounts))
+	mux.HandleFunc("/api/accounts/restore", server.requireAdmin(server.handleRestoreAccounts))
 	mux.HandleFunc("/api/accounts/oauth/start", server.requireAdmin(server.handleAccounts))
 	mux.HandleFunc("/api/accounts/oauth/status", server.requireAdmin(server.handleOAuthStatus))
 	mux.HandleFunc("/api/accounts/oauth/callback", server.requireAdmin(server.handleOAuthCallback))

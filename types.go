@@ -187,6 +187,10 @@ type Settings struct {
 	AdminPasswordManual bool `json:"adminPasswordManual,omitempty"`
 	// AutoUpdateDisabled 关掉后，宿主机的 zcode-gateway-autoupdate.sh 会直接跳过。
 	AutoUpdateDisabled bool `json:"autoUpdateDisabled,omitempty"`
+	// EgressMode 决定模型流量走不走可选出口：direct（默认）/ fallback（被风控时兜底）/ always。
+	EgressMode string `json:"egressMode,omitempty"`
+	// EgressRotate 为 true 时，兜底重试前先让中继换一个出口 IP。
+	EgressRotate bool `json:"egressRotate,omitempty"`
 }
 
 type Overview struct {

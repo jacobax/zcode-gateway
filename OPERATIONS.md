@@ -206,6 +206,25 @@ zcode-claimer.timer（每小时 :17）──► 面板管理接口 ──► 上
 
 代理池在 `/etc/zcode-relay/proxies.txt`，一行一个 `host:port`（支持 `user:pass@host:port`）。
 这批是开放代理，随时会挂——中继的体检会剔除失效的，全挂了就回 502，那一轮放弃、下一轮再来。
+## 网关出口（代理池要不要兼作出口）
+
+结论：**默认别开**。
+
+- 住宅代理的 RTT 比直连高一个数量级，流式响应会明显变卡；而且池子里的出口 IP 本身可能
+  已经被别人用脏，`always` 反而更容易吃 3012。
+- 真正有用的是 `fallback`：直连正常时零成本，只有直连被 3012/429 时才换住宅出口重打一次，
+  给「VPS 的 IP 被盯上」留一条退路。
+- 面板「设置 → 网关出口」三档：`direct`（默认）/ `fallback` / `always`；
+  「兜底前先换出口 IP」打开时先调中继 `/rotate`。
+- 出口地址取 `ZCODE_PROXY_URL_EGRESS`，没配就复用 `ZCODE_PROXY_URL_CLAIM`。
+
+## 账号备份
+
+面板「账号管理 → 导出备份」把账号连同凭据打包成口令加密的 JSON（scrypt + AES-256-GCM），
+「导入备份」按 `provider + 上游用户 ID` 判重，已存在的跳过、账号 ID 重新分配。
+不直接拷 `data/accounts.json` 的原因：那份里的凭据绑本机 `master.key`，换机器解不开。
+口令丢了文件就废了，没有后门。
+
 
 回退：删掉 `/etc/systemd/system/zcode-gateway.service.d/claim-proxy.conf` 再 restart，
 网关就回到全部直连。

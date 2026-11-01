@@ -363,7 +363,9 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			"settings":       settings,
 			"passwordSource": s.passwordSource(),
 			"proxyTokenMask": maskToken(real),
-			"proxyTokenSet":  real != "",
+			"proxyTokenSet":   real != "",
+			"egressAvailable": s.upstream.HasEgress(),
+			"egressProxy":     proxyDisplay(s.upstream.EgressProxyURL()),
 			"server": ServerInfo{
 				Version: s.version, BuildVersion: buildVersion, BaseURL: s.baseURL, Fingerprint: settings.Fingerprint,
 				QuotaSeconds: settings.QuotaIntervalSec, DataDir: s.store.dir,
@@ -379,6 +381,8 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			PromptMode         *string `json:"promptMode"`
 			UAProfile          *string `json:"uaProfile"`
 			AutoUpdate         *bool   `json:"autoUpdate"`
+			EgressMode         *string `json:"egressMode"`
+			EgressRotate       *bool   `json:"egressRotate"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			writeError(w, 400, "invalid json")
@@ -415,6 +419,15 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			}
 			if body.AutoUpdate != nil {
 				st.AutoUpdateDisabled = !*body.AutoUpdate
+			}
+			if body.EgressMode != nil {
+				switch *body.EgressMode {
+				case "direct", "fallback", "always":
+					st.EgressMode = *body.EgressMode
+				}
+			}
+			if body.EgressRotate != nil {
+				st.EgressRotate = *body.EgressRotate
 			}
 		})
 		settings := s.store.Settings()
@@ -602,6 +615,11 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request, opts relayOptions
 	var lastStatus int
 	var lastBody []byte
 	var lastErr error
+	egressMode := s.store.Settings().EgressMode
+	rotateEgress := s.store.Settings().EgressRotate
+	if !s.upstream.HasEgress() {
+		egressMode = "direct"
+	}
 	tried := map[string]bool{}
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		acc, release, err := s.pool.AcquireExcludingModel(r.Context(), sessionKey, tried, opts.model)
@@ -625,7 +643,9 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request, opts relayOptions
 			defer release()
 			ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
 			defer cancel()
-			resp, reqBytes, err := s.Forward(ctx, acc, opts.body, clientHeaders)
+
+			viaEgress := egressMode == "always"
+			resp, reqBytes, err := s.forwardVia(ctx, acc, opts.body, clientHeaders, viaEgress)
 			if err != nil {
 				lastErr = err
 				if r.Context().Err() == nil {
@@ -635,25 +655,29 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request, opts relayOptions
 				}
 				return
 			}
-			if resp.StatusCode == 200 {
-				usage, timing, respBytes, respPreview := opts.render(ctx, w, resp, start)
-				s.recordLog(acc, opts.model, opts.stream, 200, true, time.Since(start), usage, timing, resp.Header.Get("x-request-id"), sessionKey, r, opts.clientReqBody, respPreview, len(reqBytes), respBytes, "")
-				s.pool.TouchSession(sessionKey)
-				s.store.ResetRiskStrikes(acc.ID)
-				done = true
+			verdict, done, lastStatus, lastBody = s.handleAttempt(ctx, w, r, acc, resp, opts, sessionKey, len(reqBytes), start)
+			if done {
 				return
 			}
-			data, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-			resp.Body.Close()
-			lastStatus = resp.StatusCode
-			verdict = classifyUpstream(resp.StatusCode, resp.Header.Get("Retry-After"), data)
+			// 兜底：直连被风控或限流时，换住宅出口再打同一个号一次。
+			// 只有真失败才付这个延迟，正常请求仍然直连。
+			if egressMode == "fallback" && !viaEgress && (verdict.Risk || verdict.RateLimited) {
+				if rotateEgress {
+					s.rotateEgress(ctx)
+				}
+				resp2, reqBytes2, err2 := s.ForwardViaEgress(ctx, acc, opts.body, clientHeaders)
+				if err2 != nil {
+					s.applyVerdict(acc, verdict, opts.model)
+					return
+				}
+				verdict, done, lastStatus, lastBody = s.handleAttempt(ctx, w, r, acc, resp2, opts, sessionKey, len(reqBytes2), start)
+				if done {
+					return
+				}
+			}
 			if verdict.Retry {
 				s.applyVerdict(acc, verdict, opts.model)
-				return
 			}
-			s.recordLog(acc, opts.model, opts.stream, resp.StatusCode, false, time.Since(start), Usage{}, streamTiming{}, resp.Header.Get("x-request-id"), sessionKey, r, opts.clientReqBody, truncate(string(data), 8192), len(reqBytes), len(data), verdict.Reason)
-			opts.writeUpstream(w, resp.StatusCode, data)
-			done = true
 		}()
 		if done || r.Context().Err() != nil {
 			return
@@ -674,6 +698,7 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request, opts relayOptions
 			continue
 		}
 	}
+
 	if lastStatus == 0 {
 		if lastErr != nil {
 			opts.writeError(w, 502, lastErr.Error())
@@ -684,6 +709,51 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request, opts relayOptions
 	}
 	opts.writeUpstream(w, lastStatus, lastBody)
 }
+
+func (s *Server) forwardVia(ctx context.Context, acc *Account, body map[string]any, clientHeaders map[string]string, viaEgress bool) (*fhttp.Response, []byte, error) {
+	if viaEgress {
+		return s.ForwardViaEgress(ctx, acc, body, clientHeaders)
+	}
+	return s.Forward(ctx, acc, body, clientHeaders)
+}
+
+// handleAttempt 处理一次上游响应：200 就地渲染并记账（done=true），
+// 其余情况只做分类，由调用方决定换号、等待还是走兜底出口。
+func (s *Server) handleAttempt(ctx context.Context, w http.ResponseWriter, r *http.Request, acc *Account, resp *fhttp.Response, opts relayOptions, sessionKey string, reqBytes int, start time.Time) (upstreamVerdict, bool, int, []byte) {
+	if resp.StatusCode == 200 {
+		usage, timing, respBytes, respPreview := opts.render(ctx, w, resp, start)
+		s.recordLog(acc, opts.model, opts.stream, 200, true, time.Since(start), usage, timing, resp.Header.Get("x-request-id"), sessionKey, r, opts.clientReqBody, respPreview, reqBytes, respBytes, "")
+		s.pool.TouchSession(sessionKey)
+		s.store.ResetRiskStrikes(acc.ID)
+		return upstreamVerdict{}, true, 200, nil
+	}
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	resp.Body.Close()
+	verdict := classifyUpstream(resp.StatusCode, resp.Header.Get("Retry-After"), data)
+	if verdict.Retry {
+		return verdict, false, resp.StatusCode, data
+	}
+	s.recordLog(acc, opts.model, opts.stream, resp.StatusCode, false, time.Since(start), Usage{}, streamTiming{}, resp.Header.Get("x-request-id"), sessionKey, r, opts.clientReqBody, truncate(string(data), 8192), reqBytes, len(data), verdict.Reason)
+	opts.writeUpstream(w, resp.StatusCode, data)
+	return verdict, true, resp.StatusCode, data
+}
+
+// rotateEgress 让本地中继换一个出口 IP；失败不影响主流程。
+func (s *Server) rotateEgress(ctx context.Context) {
+	base := envOr("ZCODE_RELAY_ADMIN", "http://127.0.0.1:3129")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/rotate", nil)
+	if err != nil {
+		return
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+}
+
 
 // applyVerdict 把分类结论落到账号状态上：能修的修，修不了才冷却或停用。
 func (s *Server) applyVerdict(acc *Account, v upstreamVerdict, model string) {

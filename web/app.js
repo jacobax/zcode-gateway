@@ -745,6 +745,10 @@ async function loadSettings() {
     if ($('build-version')) $('build-version').textContent = data.server.buildVersion ? `v${data.server.buildVersion}` : '开发构建';
     if ($('client-version')) $('client-version').textContent = `ZCode ${data.server.version}`;
     if ($('setting-autoupdate')) $('setting-autoupdate').checked = !data.settings.autoUpdateDisabled;
+    if ($('setting-egress-mode')) $('setting-egress-mode').value = data.settings.egressMode || 'direct';
+    if ($('setting-egress-rotate')) $('setting-egress-rotate').checked = !!data.settings.egressRotate;
+    if ($('egress-proxy')) $('egress-proxy').textContent = data.egressProxy || '未配置（需要 ZCODE_PROXY_URL_CLAIM 或 ZCODE_PROXY_URL_EGRESS）';
+    if ($('egress-state')) $('egress-state').textContent = data.egressAvailable ? '可用' : '未配置';
     loadUpdate(false);
     if ($('setting-concurrency')) $('setting-concurrency').value = String(data.settings.defaultConcurrency || 1);
     const sourceLabels = { env: '来自环境变量', panel: '面板保存的密码', generated: '本次启动随机生成（已写入面板）', none: '未设置' };
@@ -887,6 +891,8 @@ async function saveSettings() {
       quotaIntervalSec: Number($('setting-quota').value) || 30,
       defaultConcurrency: Number($('setting-concurrency').value) || 1,
       autoUpdate: $('setting-autoupdate').checked,
+      egressMode: $('setting-egress-mode').value,
+      egressRotate: $('setting-egress-rotate').checked,
     };
     // 明文 token 不回显：只有用户真的输入了、或者点了「清除」才提交这个字段。
     if (typedToken) body.proxyToken = typedToken;
@@ -957,6 +963,80 @@ function openAddModal() {
 function closeModal(id) {
   $(id).classList.add('hidden');
   if (id === 'modal-add') stopAddPolling();
+}
+
+// ---------- 账号导入导出 ----------
+let portableMode = 'export';
+
+function openPortableModal(mode) {
+  portableMode = mode;
+  const isExport = mode === 'export';
+  $('portable-title').textContent = isExport ? '导出账号' : '导入账号备份';
+  $('portable-hint').textContent = isExport
+    ? `把当前 ${state.accounts.length} 个账号连同凭据打包成口令加密的 JSON，换机器时用同一口令导入。`
+    : '选之前导出的 JSON 文件并输入当时的同一个口令；已存在的账号会跳过。';
+  $('portable-file-field').classList.toggle('hidden', isExport);
+  $('portable-pass').value = '';
+  $('portable-file').value = '';
+  $('portable-error').classList.add('hidden');
+  $('modal-portable').classList.remove('hidden');
+}
+
+async function submitPortable() {
+  const passphrase = $('portable-pass').value.trim();
+  const error = $('portable-error');
+  error.classList.add('hidden');
+  if (passphrase.length < 8) {
+    error.textContent = '口令至少 8 位';
+    error.classList.remove('hidden');
+    return;
+  }
+  try {
+    if (portableMode === 'export') {
+      const bundle = await api('/api/accounts/export', {
+        method: 'POST',
+        body: JSON.stringify({ passphrase }),
+      });
+      const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `zcode-accounts-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      toast(`已导出 ${bundle.accounts} 个账号`);
+      closeModal('modal-portable');
+      return;
+    }
+    const file = $('portable-file').files?.[0];
+    if (!file) {
+      error.textContent = '请选择备份文件';
+      error.classList.remove('hidden');
+      return;
+    }
+    let bundle;
+    try {
+      bundle = JSON.parse(await file.text());
+    } catch (e) {
+      error.textContent = '文件不是合法 JSON';
+      error.classList.remove('hidden');
+      return;
+    }
+    const res = await api('/api/accounts/restore', {
+      method: 'POST',
+      body: JSON.stringify({ passphrase, bundle }),
+    });
+    const extra = res.invalid ? `，无效 ${res.invalid}` : '';
+    toast(`导入完成：新增 ${res.imported}，已存在 ${res.skipped}${extra}`);
+    closeModal('modal-portable');
+    await loadAccounts();
+    await loadOverview();
+  } catch (err) {
+    error.textContent = err.message;
+    error.classList.remove('hidden');
+  }
 }
 
 async function generateAuthUrl() {
@@ -1130,6 +1210,9 @@ $('logout').addEventListener('click', async () => {
 $('add-account').addEventListener('click', openAddModal);
 $('add-account-empty').addEventListener('click', openAddModal);
 $('import-local').addEventListener('click', importLocalAccount);
+$('export-accounts').addEventListener('click', () => openPortableModal('export'));
+$('restore-accounts').addEventListener('click', () => openPortableModal('restore'));
+$('portable-submit').addEventListener('click', submitPortable);
 $('generate-url').addEventListener('click', generateAuthUrl);
 $('copy-auth-url').addEventListener('click', () => copyText($('auth-url').value));
 $('copy-token').addEventListener('click', async () => {

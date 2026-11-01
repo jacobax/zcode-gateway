@@ -23,6 +23,9 @@ type Upstream struct {
 	// 单独走一个能换出口的代理（通常是本地中继 → 住宅代理池）。
 	claimClient   tls_client.HttpClient
 	claimProxyURL string
+	// egress 是模型流量可选的出口：指向本地中继时，等价于把住宅代理池当网关出口。
+	egressClient   tls_client.HttpClient
+	egressProxyURL string
 }
 
 func normalizeProxyURL(raw string) (string, error) {
@@ -93,6 +96,19 @@ func NewUpstream() (*Upstream, error) {
 		u.claimClient = claimClient
 		u.claimProxyURL = claimURL
 	}
+	// 网关出口：默认复用领取中继（ZCODE_PROXY_URL_CLAIM），也可用 ZCODE_PROXY_URL_EGRESS 单独指定。
+	if raw := envOr("ZCODE_PROXY_URL_EGRESS", envOr("ZCODE_PROXY_URL_CLAIM", "")); raw != "" {
+		egressURL, err := normalizeProxyURL(raw)
+		if err != nil {
+			return nil, err
+		}
+		egressClient, err := newTLSClient(egressURL)
+		if err != nil {
+			return nil, err
+		}
+		u.egressClient = egressClient
+		u.egressProxyURL = egressURL
+	}
 	return u, nil
 }
 
@@ -103,6 +119,16 @@ func (u *Upstream) ProxyURL() string {
 // ClaimProxyURL 是领取/活动调用实际使用的代理（空 = 与主流量相同）。
 func (u *Upstream) ClaimProxyURL() string {
 	return u.claimProxyURL
+}
+
+// HasEgress 表示是否配置了可选的模型出口（本地中继或独立代理）。
+func (u *Upstream) HasEgress() bool {
+	return u.egressClient != nil
+}
+
+// EgressProxyURL 是模型出口代理地址（空 = 未配置）。
+func (u *Upstream) EgressProxyURL() string {
+	return u.egressProxyURL
 }
 
 // claimDoer 让领取/活动这类调用走独立出口，主流量（模型请求、额度刷新）保持直连。
@@ -142,6 +168,15 @@ func (s *Server) ensureProjectToken(ctx context.Context, acc *Account) (string, 
 }
 
 func (s *Server) Forward(ctx context.Context, acc *Account, body map[string]any, clientHeaders map[string]string) (*fhttp.Response, []byte, error) {
+	return s.forward(ctx, acc, body, clientHeaders, false)
+}
+
+// ForwardViaEgress 走可选出口（本地中继 / 独立代理），用于直连被风控时的兜底重试。
+func (s *Server) ForwardViaEgress(ctx context.Context, acc *Account, body map[string]any, clientHeaders map[string]string) (*fhttp.Response, []byte, error) {
+	return s.forward(ctx, acc, body, clientHeaders, true)
+}
+
+func (s *Server) forward(ctx context.Context, acc *Account, body map[string]any, clientHeaders map[string]string, viaEgress bool) (*fhttp.Response, []byte, error) {
 	payload := make(map[string]any, len(body))
 	for k, v := range body {
 		payload[k] = v
@@ -229,7 +264,11 @@ func (s *Server) Forward(ctx context.Context, acc *Account, body map[string]any,
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := s.upstream.Do(req)
+	doer := s.upstream.Do
+	if viaEgress && s.upstream.egressClient != nil {
+		doer = s.upstream.egressClient.Do
+	}
+	resp, err := doer(req)
 	if err != nil {
 		return nil, nil, err
 	}

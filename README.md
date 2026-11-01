@@ -16,6 +16,8 @@
 | 面板安全 | 无 | 登录爆破防护（5 次 / 5 分钟）、token 不回显明文 |
 | 领取 | 外部脚本自行实现 | `contrib/claimer` + 1005 的 `next_at` 退避 |
 | 领取出口 | 直连 | `contrib/relay` 住宅代理中继，按次换 IP |
+| 网关出口 | 只能直连 | 可选：直连 / 被风控时兜底 / 全量走代理池（面板里选） |
+| 账号备份 | 无 | 口令加密的导入导出，换机可用 |
 | 版本 | 无 | 面板显示网关版本 + 检查 GitHub 最新 release |
 | 发布 | 手工编译 | tag 触发六平台构建，发布包含 `contrib/`、`deploy/` |
 | 运维 | 无 | `OPERATIONS.md`：已知坑、回滚、发版节奏 |
@@ -88,8 +90,8 @@ go build -trimpath -ldflags="-s -w" -o zcode-gateway .
 | `ZCODE_ADMIN_PASSWORD` | 随机生成 | 面板密码**初始值**；面板里改过后以面板为准 |
 | `ZCODE_APP_VERSION` | `3.16.3` | 模拟的 ZCode 客户端版本（UA 与 `X-ZCode-App-Version` 等身份头都取它）。**升级前必须做单账号 A/B 验证**，见 `OPERATIONS.md` 第 10 条坑 |
 | `ZCODE_UPSTREAM` | `https://zcode.z.ai` | 上游地址 |
-| `ZCODE_PROXY_URL` | 空 | 全局出口代理（http/https/socks5） |
 | `ZCODE_PROXY_URL_CLAIM` | 空 | 只给领取/活动用的出口（通常指向本地中继） |
+| `ZCODE_PROXY_URL_EGRESS` | 同 `CLAIM` | 模型流量可选出口；面板「网关出口」决定用不用 |
 | `ZCODE_POOL_TOPN` | `5` | 加权选号的短名单大小 |
 | `ZCODE_RETRY_WAIT_SEC` | `20` | 429 原地重试的总预算，0 表示不等待 |
 | `ZCODE_REQUEST_TIMEOUT_SEC` | `600` | 单个上游请求超时 |
