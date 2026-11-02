@@ -33,8 +33,12 @@ jobs:
       - name: 检查前端资源
         run: |
           set -euo pipefail
-          # 面板资源靠 ?v=N 绕过 CDN 缓存，改 web/ 必须 bump，这里做个提醒式校验
+          # 面板资源靠 ?v=N 绕过 CDN 缓存，改 web/ 必须 bump
           node --check web/app.js
+          node --check web/login.js
+          # 光查语法不够：少一个 } 会让后面的函数被吞进上一个函数体，
+          # 顶层监听引用时 ReferenceError，整页白屏（右下角永远「连接中 v-」）。
+          # 用 DOM 桩把 app.js 真跑一遍才抓得到这类错。
+          node scripts/web-smoke.js web/app.js
       - name: 扫描凭据与私人信息
         run: bash scripts/scan-secrets.sh
-          node --check web/login.js

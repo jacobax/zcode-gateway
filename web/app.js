@@ -455,7 +455,7 @@ async function refreshAccount(id) {
   } catch (error) {
     toast(error.message, true);
   }
-
+}
 // ---------- 手动领取 ----------
 // 网关侧是后台任务：POST /api/claim 立刻返回，靠 GET /api/claim 轮询进度。
 // 一次全号领取要跑几十分钟（每个号都要起一次 Chromium 解验证码），
@@ -552,7 +552,6 @@ async function startClaim(accountIds) {
   } catch (error) {
     toast(error.message, true);
   }
-}
 }
 
 function activityPeriod(period) {
@@ -1351,7 +1350,9 @@ document.addEventListener('click', (event) => {
 });
 
 $('refresh-all').addEventListener('click', async () => {
-$('claim-all').addEventListener('click', () => startClaim([]));
+// 新加的元素都先判存在：万一浏览器还缓存着旧版 index.html（它引用的是旧
+// ?v=，服务端照样返回新 app.js），没这个 guard 就是整页白屏。
+if ($('claim-all')) $('claim-all').addEventListener('click', () => startClaim([]));
   await Promise.all([loadOverview(), loadAccounts(), loadLogs()]);
   toast('已刷新');
 });
