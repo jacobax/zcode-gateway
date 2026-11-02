@@ -283,6 +283,19 @@ func (s *Server) refreshQuota(ctx context.Context, acc *Account) error {
 	for _, key := range modelOrder {
 		quota.Models = append(quota.Models, *aggregate[key])
 	}
+	// 面板上显示的套餐名要跟着"哪份额度真的能用"走，而不是优先级最高的那份。
+	// 例：领了优先级 111 的 GLOBAL BUILD（3 亿、23:00 才生效），号上原有的
+	// 0817 还在用（8M 立即可用）——这时候 granted 来自 0817，名字也该是 0817，
+	// 否则概览会把 8M 错算进 GLOBAL BUILD 名下。
+	if best := displayPlan(quota.Plans); best != nil {
+		quota.PlanName = best.Name
+		quota.PlanID = best.PlanID
+		quota.Status = best.Status
+		quota.EndsAt = best.EndsAt
+		if currentPlan == nil {
+			currentPlan = &PlanInfo{PlanID: best.PlanID, Name: best.Name, Status: best.Status}
+		}
+	}
 	if quota.Granted > 0 {
 		quota.Percent = float64(quota.Remaining) / float64(quota.Granted) * 100
 	}
@@ -367,6 +380,26 @@ func pendingSummary(items []QuotaPending) string {
 		parts = append(parts, fmt.Sprintf("%s %d", item.Model, item.Amount))
 	}
 	return strings.Join(parts, "，")
+}
+
+// displayPlan 挑面板上该显示哪个套餐名：优先「真的还有可用额度」的那份，
+// 都没额度时才退回优先级最高的。避免把 A 套餐的额度记到 B 套餐名下。
+func displayPlan(plans []QuotaPlan) *QuotaPlan {
+	var withQuota *QuotaPlan
+	var byPriority *QuotaPlan
+	for i := range plans {
+		p := &plans[i]
+		if p.Remaining > 0 && (withQuota == nil || p.Remaining > withQuota.Remaining) {
+			withQuota = p
+		}
+		if byPriority == nil || p.Priority > byPriority.Priority {
+			byPriority = p
+		}
+	}
+	if withQuota != nil {
+		return withQuota
+	}
+	return byPriority
 }
 
 func pendingWhen(items []QuotaPending) string {
