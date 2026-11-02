@@ -57,31 +57,31 @@ func (s *Server) refreshAllQuotas(ctx context.Context) {
 func (s *Server) refreshQuota(ctx context.Context, acc *Account) error {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	plan, err := fetchCurrentPlan(ctx, s.upstream, acc.ZcodeJWT, s.profileHeaders(acc), *s.store.EnsureProfile(acc))
-	if err != nil {
-		s.store.UpdateAccount(acc.ID, func(a *Account) {
-			a.Quota.Error = err.Error()
-			a.Quota.UpdatedAt = time.Now().Unix()
-		})
-		return err
-	}
 	quota := Quota{Source: "local", UpdatedAt: time.Now().Unix()}
 	var activePlans []*PlanInfo
 	var currentPlan *PlanInfo
-	for i := range plan.Data.Plans {
-		if !strings.EqualFold(plan.Data.Plans[i].Status, "active") {
-			continue
+	// billing/current 从 2026-10 起对所有账号返回 plans: []，偶尔还 429 回空
+	// body。它失败不该拖死整次刷新——真实套餐在下面的 billing/balance 里。
+	// 原来这里直接 return err，一次 429 就让这个号的额度停在旧值上一整轮。
+	plan, planErr := fetchCurrentPlan(ctx, s.upstream, acc.ZcodeJWT, s.profileHeaders(acc), *s.store.EnsureProfile(acc))
+	if planErr != nil {
+		quota.Error = planErr.Error()
+	} else {
+		for i := range plan.Data.Plans {
+			if !strings.EqualFold(plan.Data.Plans[i].Status, "active") {
+				continue
+			}
+			activePlans = append(activePlans, &plan.Data.Plans[i])
+			if currentPlan == nil || plan.Data.Plans[i].Priority > currentPlan.Priority {
+				currentPlan = &plan.Data.Plans[i]
+			}
 		}
-		activePlans = append(activePlans, &plan.Data.Plans[i])
-		if currentPlan == nil || plan.Data.Plans[i].Priority > currentPlan.Priority {
-			currentPlan = &plan.Data.Plans[i]
+		if currentPlan != nil {
+			quota.PlanName = currentPlan.Name
+			quota.PlanID = currentPlan.PlanID
+			quota.Status = currentPlan.Status
+			quota.EndsAt = currentPlan.EndsAt
 		}
-	}
-	if currentPlan != nil {
-		quota.PlanName = currentPlan.Name
-		quota.PlanID = currentPlan.PlanID
-		quota.Status = currentPlan.Status
-		quota.EndsAt = currentPlan.EndsAt
 	}
 	usageByModel := map[string]UsageTotals{}
 	for name, totals := range acc.Models {
@@ -370,6 +370,11 @@ func (s *Server) refreshQuota(ctx context.Context, acc *Account) error {
 	if quota.Granted > 0 && quota.Remaining <= 0 {
 		// Hard failure: no session can stay on an account without quota.
 		s.pool.InvalidateAccount(acc.ID)
+	}
+	// 两条路都断了才算刷新失败；只挂一条（current 空/429）时 balance 往往还
+	// 能给出真实额度，不该让调用方以为整次刷新白跑。
+	if planErr != nil && balanceErr != nil {
+		return planErr
 	}
 	return nil
 }

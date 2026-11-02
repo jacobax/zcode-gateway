@@ -1,20 +1,29 @@
 #!/usr/bin/env python3
 """ZCode 套餐自动领取 sidecar —— 配合 Ciii-ATM/zcode-gateway 使用。
 
-做三件事：
 做四件事：
   1. 按额度自动启停：有额度（remaining>0）就启用回池；上游明确回了空余额
      （source=api-empty）且 granted==0，连续 N 轮就禁用，避免它被选号选中后
-     给客户端返回 1005。source=local 表示没查成功，不据此禁用。
-  3. 领到≠能用：领取成功后再刷一次额度，确认真的到账才启用；部分活动有生效时间，
+     给客户端返回 1005。source=local 表示没查成功，不据此禁用；
+     source=api-pending 表示已领到但还没到生效时间，只等不禁。
+  2. 领到≠能用：领取成功后再刷一次额度，确认真的到账才启用；部分活动有生效时间，
      没到账的记进 pending_activation，等后续轮次额度出现再自动启用。
-     对还没领到的逐条提交领取；验证码用本机 Chromium 跑官方 SDK。
-  3. 领到就启用：不管当初是谁禁用的，领取成功后立刻 PATCH enabled=true 并刷新额度。
-  4. 记忆：同一 (账号, 套餐) 命中 1001–1005 后 6 小时内不再重试，避免每小时重复解验证码。
+  3. 逐个领取：对还没领到的逐条提交领取，验证码用本机 Chromium 跑官方 SDK。
+  4. 记忆：同一 (账号, 套餐) 命中 1001–1005 / 3012 后 6 小时内不再重试。
 
-关于 claimable：上游 preview 会把套餐列给很多账号，但只在少数账号上标 claimable=true。
-实测（2026-10-30 zcode-v3-start-plan-1030-wk）标 false 的账号强行领取依然成功，
-所以默认不再以 claimable 为门槛，只跳过「已领取」的项。想保守可设 ZC_REQUIRE_CLAIMABLE=1。
+关于领取出口：配置 ZC_RELAY_ROTATE_URL 后，每次领取前先换一个出口 IP，然后
+**让 Chromium 也走同一个出口**去解验证码。阿里云的 captchaVerifyParam 绑 IP，
+在 A 网解出来的 token 拿到 B 网去用，上游直接判 3012「账号或者网络环境存在异常」。
+2026-11 实测：同一个号，solver 直连（VPS IP）+ 领取走中继 → 3012；solver 也走
+中继、和领取同 IP → 成功。这也是为什么下面的顺序必须是「换出口 → 解验证码 → 领取」。
+
+关于活动横幅：marketing/touch 是 **按出口 IP 下发**的。VPS 直连常常拿到
+deliveries:[]（看起来像没有活动），换个住宅代理出口就有了。所以面板的
+claimEgress 要设成 proxy/proxy_fallback，别用 direct_fallback——后者直连
+一旦返回 200 就不会回退，活动页会一直空着。
+
+关于 claimable：上游 preview 从 2026-11 起对多数号返回空 data，claimable 现在
+改看 marketing 横幅上有没有 claim_zcode_plan 按钮。想保守可设 ZC_REQUIRE_CLAIMABLE=1。
 
 用法：
   claim_round.py            正常跑一轮
@@ -24,12 +33,12 @@
   ZC_PASSWORD           面板密码（必填）
   ZC_SOLVER_DIR         默认 /opt/zcode-claimer/solver
   ZC_MIN_AVAIL_MB       低于该可用内存就跳过本轮，默认 450
-  ZC_MAX_SOLVES         单轮最多解几次验证码，默认 8
-  ZC_REQUIRE_CLAIMABLE  1 = 只领 preview 标记可领的（默认 0）
+  ZC_MAX_SOLVES         单轮最多解几次验证码，默认 0（不限；靠内存与 3012 熔断兜底）
+  ZC_REQUIRE_CLAIMABLE  1 = 只领标记可领的（默认 0）
   ZC_RETRY_SKIP_HOURS   失败缓存有效期，默认 6（1001–1005 与 3012 都缓存）
   ZC_CLAIM_GAP_SEC      两次领取之间的间隔秒数，默认 15（防 3012 风控）
   ZC_RELAY_ROTATE_URL   本地中继的换 IP 接口，如 http://127.0.0.1:3129/rotate
-                        （设了就在每次 claim 前换一个出口；见 contrib/relay）
+  ZC_RELAY_PROXY_URL    中继的代理地址，solver 也走它（默认从上面那个推导）
   ZC_AUTO_MANAGE        1 = 按额度自动启停（默认 1，旧名 ZC_AUTO_ENABLE 仍可用）
   ZC_EMPTY_ROUNDS       连续几轮无额度才禁用，默认 2
   ZC_ENABLE_AFTER_CLAIM  1 = 领到套餐后自动启用该账号（默认 1）
@@ -46,14 +55,24 @@ import http.cookiejar
 
 BASE = os.environ.get("ZC_BASE", "http://127.0.0.1:3000").rstrip("/")
 PASSWORD = os.environ.get("ZC_PASSWORD", "")
+# 单轮最多解几次验证码。默认不设限——真正的闸是「可用内存」和「连续 3012 熔断」，
+# 再叠一个数字上限只会让 58 个号的小时轮要跑 8 小时。0 = 不限。
+MAX_SOLVES = int(os.environ.get("ZC_MAX_SOLVES", "0"))
 SOLVER_DIR = os.environ.get("ZC_SOLVER_DIR", "/opt/zcode-claimer/solver")
 MIN_AVAIL_MB = int(os.environ.get("ZC_MIN_AVAIL_MB", "450"))
-MAX_SOLVES = int(os.environ.get("ZC_MAX_SOLVES", "8"))
 SOLVER_TIMEOUT = int(os.environ.get("ZC_SOLVER_TIMEOUT", "120"))
 REQUIRE_CLAIMABLE = os.environ.get("ZC_REQUIRE_CLAIMABLE", "0") == "1"
 CLAIM_GAP_SEC = float(os.environ.get("ZC_CLAIM_GAP_SEC", "15"))
-# 每次 claim 之前让本地中继换一个出口 IP（中继的 GET /rotate）
+# 3012 命中后换出口重试几次（每次重试都会换 IP 并重新解验证码）
+CLAIM_3012_RETRIES = max(0, int(os.environ.get("ZC_3012_RETRIES", "2")))
 RELAY_ROTATE_URL = os.environ.get("ZC_RELAY_ROTATE_URL", "")
+# 中继本身的代理地址：solver 必须也走它，才能和领取同 IP（见 solve_captcha）。
+# 默认从 ROTATE_URL 去掉 /rotate 得到，也可用 ZC_RELAY_PROXY_URL 单独指定。
+RELAY_PROXY_URL = os.environ.get("ZC_RELAY_PROXY_URL", "")
+if not RELAY_PROXY_URL and RELAY_ROTATE_URL:
+    RELAY_PROXY_URL = RELAY_ROTATE_URL.rsplit("/rotate", 1)[0]
+# 失败缓存有效期：命中 1001–1005 / 3012 后多久内不再重试（避免每小时重复解验证码）
+RETRY_SKIP_HOURS = float(os.environ.get("ZC_RETRY_SKIP_HOURS", "6"))
 AUTO_MANAGE = os.environ.get("ZC_AUTO_MANAGE", os.environ.get("ZC_AUTO_ENABLE", "1")) == "1"
 EMPTY_ROUNDS = max(1, int(os.environ.get("ZC_EMPTY_ROUNDS", "2")))
 # 领到套餐后自动启用该账号：不管当初是谁禁用的（脚本/迁移/手动），
@@ -136,12 +155,26 @@ def api(method, path, body=None, timeout=60):
         return 0, {"error": str(e)}
 
 
-def solve_captcha(scene, region, prefix):
+def solve_captcha(scene, region, prefix, proxy=""):
+    """解验证码。
+
+    proxy 必须和接下来领取用的出口是同一个 IP —— 阿里云的 captchaVerifyParam
+    绑 IP，在 A 网解出来的 token 拿到 B 网去用，上游直接判 3012「账号或者网络
+    环境存在异常」。2026-11 实测：同一个号，solver 直连（VPS IP）+ 领取走中继
+    → 3012；solver 也走中继、和领取同 IP → 成功。
+    """
     t0 = time.time()
+    env = None
+    if proxy:
+        env = dict(os.environ)
+        env["HTTP_PROXY"] = proxy
+        env["HTTPS_PROXY"] = proxy
+        env["NO_PROXY"] = ""
+        env.pop("ALL_PROXY", None)
     try:
         p = subprocess.run(["node", "solver_pw.js", scene, region, prefix],
                            cwd=SOLVER_DIR, capture_output=True, text=True,
-                           timeout=SOLVER_TIMEOUT)
+                           timeout=SOLVER_TIMEOUT, env=env)
     except subprocess.TimeoutExpired:
         say(f"    求解器超时（>{SOLVER_TIMEOUT}s）")
         return None
@@ -366,28 +399,43 @@ def main():
 
     claimed = failed = streak_3012 = 0
     for i, (aid, label, plan_id, name, scene, region, prefix) in enumerate(todo):
-        if i >= MAX_SOLVES:
+        if MAX_SOLVES > 0 and i >= MAX_SOLVES:
             say(f"  已达单轮上限 {MAX_SOLVES} 次求解，剩余留到下一轮")
             break
         if i:
             # 同一个出口 IP 连续领取很容易触发上游风控（3012），拉开节奏
             time.sleep(CLAIM_GAP_SEC)
         say(f"  领取 {label} / {name} ({plan_id})")
-        param = ""
-        if scene and region and prefix:
-            param = solve_captcha(scene, region, prefix)
-            if not param:
-                failed += 1
-                continue
-        else:
-            # 上游没下发验证码配置时仍直接尝试（有的活动不校验验证码）
-            say(f"  {label}: 无验证码配置，尝试不带验证码领取")
-        body = {"planId": plan_id}
-        if param:
-            body["captchaVerifyParam"] = param
-            body["captchaRegion"] = region
-        rotate_relay()
-        st, res = api("POST", f"/api/accounts/{aid}/claim", body, timeout=120)
+        res = {}
+        st, code = 0, None
+        # 3012 大多是「这个出口 IP 脏」而不是账号问题：换个出口重试通常就过。
+        # 同一出口反复试没意义，所以重试一定跟着换 IP。
+        for try_no in range(CLAIM_3012_RETRIES + 1):
+            if try_no:
+                say(f"    3012 风控 → 换出口重试（{try_no}/{CLAIM_3012_RETRIES}）")
+                time.sleep(CLAIM_GAP_SEC)
+            # 顺序不能反：先换出口，再让 solver 用这个出口解验证码，最后用同一个
+            # 出口领取。captchaVerifyParam 绑 IP，三步跨了网就是 3012。
+            rotate_relay()
+            param = ""
+            if scene and region and prefix:
+                param = solve_captcha(scene, region, prefix, proxy=RELAY_PROXY_URL)
+                if not param:
+                    st, code = 0, "solve-failed"
+                    break
+            else:
+                # 上游没下发验证码配置时仍直接尝试（有的活动不校验验证码）
+                say(f"  {label}: 无验证码配置，尝试不带验证码领取")
+            body = {"planId": plan_id}
+            if param:
+                body["captchaVerifyParam"] = param
+                body["captchaRegion"] = region
+            st, res = api("POST", f"/api/accounts/{aid}/claim", body, timeout=120)
+            code = res.get("code")
+            if st == 200 and res.get("ok"):
+                break
+            if code != 3012:
+                break
         code = res.get("code")
         if st == 200 and res.get("ok"):
             claimed += 1
@@ -430,6 +478,11 @@ def main():
                     save_quota_state(qstate)
                     say("    ↳ 已刷新额度")
         else:
+            if code == "solve-failed":
+                # 求解失败不算账号的错，也不写缓存——下一轮还能再试
+                failed += 1
+                say("    ❌ 验证码求解失败，跳过（不写失败缓存）")
+                continue
             failed += 1
             attempts[f"{aid}|{plan_id}"] = {
                 "code": code, "ts": now, "msg": str(res.get("message"))[:80],
@@ -439,7 +492,7 @@ def main():
             streak_3012 = streak_3012 + 1 if code == 3012 else 0
         save_attempts(attempts)
         if streak_3012 >= 3:
-            say("  连续 3 次 3012 风控，本轮提前结束（这些项 6 小时内不再重试）")
+            say("  连续 3 个号都吃 3012，本轮提前结束（这些项 6 小时内不再重试）")
             break
 
     say(f"  本轮结束：成功 {claimed}，失败 {failed}，缓存跳过 {skipped}")
