@@ -198,6 +198,10 @@ type Overview struct {
 		Total     int `json:"total"`
 		Enabled   int `json:"enabled"`
 		Available int `json:"available"`
+		// Plans 按套餐名聚合：每个套餐有多少个号、合计剩余多少额度。
+		Plans []PlanStat `json:"plans"`
+		// Quota 是启用中账号的额度合计。
+		Quota OverviewQuota `json:"quota"`
 	} `json:"accounts"`
 	Today struct {
 		Requests         int `json:"requests"`
@@ -211,6 +215,24 @@ type Overview struct {
 	ActiveAccount *AccountSummary `json:"activeAccount,omitempty"`
 	Recent        []*LogEntry     `json:"recent"`
 	Server        ServerInfo      `json:"server"`
+}
+
+// PlanStat 是概览页「套餐分布」的一行：某个套餐有多少个号、还剩多少额度。
+type PlanStat struct {
+	Name      string `json:"name"`
+	Count     int    `json:"count"`
+	Enabled   int    `json:"enabled"`
+	Granted   int64  `json:"granted"`
+	Remaining int64  `json:"remaining"`
+}
+
+// OverviewQuota 是启用中账号的额度合计。
+type OverviewQuota struct {
+	Granted   int64   `json:"granted"`
+	Used      int64   `json:"used"`
+	Remaining int64   `json:"remaining"`
+	Percent   float64 `json:"percent"`
+	Accounts  int     `json:"accounts"` // 有额度的账号数
 }
 
 type ServerInfo struct {

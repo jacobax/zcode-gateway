@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ZCode Gateway</title>
-<link rel="stylesheet" href="/style.css?v=11">
+<link rel="stylesheet" href="/style.css?v=12">
 <script>
   // 夜间模式：在首屏渲染前决定主题，避免闪白
   try {
@@ -71,6 +71,11 @@
           <div class="stat-foot"><span id="stat-available">0 个可用</span></div>
         </div>
         <div class="stat-card">
+          <div class="stat-label">剩余额度</div>
+          <div class="stat-value" id="stat-quota">0</div>
+          <div class="stat-foot" id="stat-quota-foot">共 0 · 已用 0%</div>
+        </div>
+        <div class="stat-card">
           <div class="stat-label">今日请求</div>
           <div class="stat-value" id="stat-requests">0</div>
           <div class="stat-foot">仅统计成功请求</div>
@@ -85,6 +90,23 @@
           <div class="stat-value" id="stat-cache">0</div>
           <div class="stat-foot" id="stat-cache-breakdown">读取 0 · 写入 0</div>
         </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <div class="card-kicker">额度</div>
+            <h2>套餐分布</h2>
+          </div>
+          <span class="muted" id="plan-summary">-</span>
+        </div>
+        <div class="table-wrap">
+          <table class="table" id="plans-table">
+            <thead><tr><th>套餐</th><th class="num">账号</th><th class="num">启用</th><th class="num">剩余 / 总额</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="empty small hidden" id="plans-empty">还没有读到套餐信息，等一轮额度刷新。</div>
       </div>
 
       <div class="card">
@@ -484,6 +506,6 @@
 </div>
 
 <div class="toast" id="toast"></div>
-<script src="/app.js?v=11"></script>
+<script src="/app.js?v=12"></script>
 </body>
 </html>

@@ -152,6 +152,18 @@ function renderOverview(data) {
   $('stat-token-breakdown').textContent = `输入 ${units(data.today?.inputTokens)} · 输出 ${units(data.today?.outputTokens)}`;
   $('stat-cache').textContent = units((data.today?.cacheReadTokens || 0) + (data.today?.cacheWriteTokens || 0));
   $('stat-cache-breakdown').textContent = `读取 ${units(data.today?.cacheReadTokens)} · 写入 ${units(data.today?.cacheWriteTokens)}`;
+  const quota = accounts.quota || {};
+  $('stat-quota').textContent = units(quota.remaining);
+  $('stat-quota-foot').textContent = `共 ${units(quota.granted)} · 已用 ${(quota.percent || 0).toFixed(0)}%`;
+  const plans = accounts.plans || [];
+  const plansBody = $('plans-table')?.querySelector('tbody');
+  if (plansBody) plansBody.innerHTML = plans.map(planRow).join('');
+  if ($('plans-empty')) $('plans-empty').classList.toggle('hidden', plans.length > 0);
+  if ($('plans-table')) $('plans-table').classList.toggle('hidden', plans.length === 0);
+  if ($('plan-summary')) {
+    const withQuota = plans.filter((p) => (p.granted || 0) > 0).length;
+    $('plan-summary').textContent = `${plans.length} 个套餐 · ${withQuota} 个有额度`;
+  }
   $('sidebar-version').textContent = `v${data.server?.version || '-'}`;
   $('api-base').textContent = data.server?.baseUrl || 'http://127.0.0.1:8787';
   $('nav-account-count').textContent = n(accounts.total);
@@ -161,6 +173,15 @@ function renderOverview(data) {
   tbody.innerHTML = recent.map(recentRow).join('');
   $('recent-empty').classList.toggle('hidden', recent.length > 0);
   $('recent-table').classList.toggle('hidden', recent.length === 0);
+}
+
+function planRow(plan) {
+  return `<tr>
+    <td class="mono ellipsis">${esc(plan.name || '-')}</td>
+    <td class="num">${n(plan.count)}</td>
+    <td class="num">${n(plan.enabled)}</td>
+    <td class="num">${units(plan.remaining)} <span class="muted-cell">/ ${units(plan.granted)}</span></td>
+  </tr>`;
 }
 
 function recentRow(log) {

@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -106,6 +107,49 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 		}
+	}
+	// 套餐分布 + 额度合计：只统计启用中的账号，禁用号不占产能也不该计入剩余额度。
+	plans := map[string]*PlanStat{}
+	for _, acc := range accounts {
+		name := strings.TrimSpace(acc.Quota.PlanName)
+		if name == "" {
+			name = "无套餐"
+		}
+		stat := plans[name]
+		if stat == nil {
+			stat = &PlanStat{Name: name}
+			plans[name] = stat
+		}
+		stat.Count++
+		if !acc.Enabled {
+			continue
+		}
+		stat.Enabled++
+		stat.Granted += acc.Quota.Granted
+		stat.Remaining += acc.Quota.Remaining
+		overview.Accounts.Quota.Granted += acc.Quota.Granted
+		overview.Accounts.Quota.Remaining += acc.Quota.Remaining
+		if acc.Quota.Granted > 0 {
+			overview.Accounts.Quota.Accounts++
+		}
+	}
+	for _, stat := range plans {
+		overview.Accounts.Plans = append(overview.Accounts.Plans, *stat)
+	}
+	sort.SliceStable(overview.Accounts.Plans, func(i, j int) bool {
+		a, b := overview.Accounts.Plans[i], overview.Accounts.Plans[j]
+		if a.Remaining != b.Remaining {
+			return a.Remaining > b.Remaining
+		}
+		return a.Name < b.Name
+	})
+	quotaTotal := &overview.Accounts.Quota
+	quotaTotal.Used = quotaTotal.Granted - quotaTotal.Remaining
+	if quotaTotal.Used < 0 {
+		quotaTotal.Used = 0
+	}
+	if quotaTotal.Granted > 0 {
+		quotaTotal.Percent = float64(quotaTotal.Used) / float64(quotaTotal.Granted) * 100
 	}
 	req, total, u := s.store.TodayTotals()
 	overview.Today.Requests = req
