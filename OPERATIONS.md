@@ -125,18 +125,10 @@ zcode-claimer.timer（每小时 :17）──► 面板管理接口 ──► 上
 
 `contrib/claimer` 每轮先跑 `manage_pass`，再走领取。判定依据是账号的额度状态：
 
-- 面板「设置 → 网关出口」三档：`direct`（默认）/ `fallback` / `always`；
-  「兜底前先换出口 IP」打开时先调中继 `/rotate`。
-- 出口地址取 `ZCODE_PROXY_URL_EGRESS`，没配就复用 `ZCODE_PROXY_URL_CLAIM`。
-- **领取出口单独可切**（面板同一张卡片）：`proxy`（走中继，默认）/ `direct`（直连）。
-  代理池全挂时切 `direct`，否则领取链路会整条 502；代价是同一 IP 连续领取容易吃 3012。
-
-### 中继体检为什么要"真发一次请求"
-
-中继原来只测「能不能建到 `zcode.z.ai:443` 的隧道」，结果 41 条代理全绿、实际一个都转发不了
-（能建隧道但一过真实 TLS 就断）。现在 `check_entry` 会完整走一遍：连代理 →（https 代理先
-TLS）→ CONNECT → 对目标再做一次 TLS → 发 `GET /api/v1/client/configs` → 看状态码。
-只回 200 不转发的"假健康"代理会当场被判死。切过去之后同一批代理 0/41 通过。
+| `quota.source` | 含义 | 自动启停怎么用 |
+|---|---|---|
+| `api` | 上游返回了余额，有额度 | 可据此启用 |
+| `api-empty` | 上游明确回了空列表（确实没套餐） | 连续 `ZC_EMPTY_ROUNDS` 轮就禁用 |
 | `local` | 没查成功（网络/鉴权），额度未知 | **不据此禁用**，避免误杀 |
 
 `api-empty` 是 v1.8.0 才分出来的。之前只有 `api` / `local` 两种，没套餐的号永远是 `local`，
@@ -148,6 +140,23 @@ TLS）→ CONNECT → 对目标再做一次 TLS → 发 `GET /api/v1/client/conf
 `pending_activation`，等后续轮次额度出现再自动启用（`ZC_ENABLE_AFTER_CLAIM=0` 可关整段）。
 不管当初是谁禁用的（脚本/迁移/手动），只要额度真到账就启用。
 
+### 中继体检为什么要"真发一次请求"
+
+中继原来只测「能不能建到 `zcode.z.ai:443` 的隧道」，结果 41 条代理全绿、实际一个都转发不了
+（能建隧道但一过真实 TLS 就断）。现在 `check_entry` 会完整走一遍：连代理 →（https 代理先
+TLS）→ CONNECT → 对目标再做一次 TLS → 发 `GET /api/v1/client/configs` → 看状态码。
+只回 200 不转发的"假健康"代理会当场被判死。切过去之后同一批代理 0/41 通过。
+
+### 顺带修掉的两个坑（2026-11-02）
+
+1. **体检探针不认 socks5**：完整链路探针一开始只走 HTTP CONNECT，socks5 代理会报
+   「CONNECT 无响应」。现在按 scheme 分支：socks5 走 SOCKS5 握手（含账号密码），
+   http/https 走 CONNECT。
+2. **转发路径解包错了**：`open_tunnel` 返回 `(reader, writer, reason)` 三元组，
+   CONNECT handler 里写的却是 `up_reader, up_writer = r`，于是**每次 CONNECT 都抛
+   `ValueError`**——隧道刚建好就断。这个 bug 跟代理质量无关，任何代理都转发不出去，
+   所以之前"代理全绿但请求全 502"是两个问题叠在一起。改成三元组解包后，
+   `curl -x http://127.0.0.1:3129 https://zcode.z.ai/...` 从 HTTP 000 变成 200。
 ## 发版节奏
 
 `release.yml` 是 tag 驱动的：推一个 `v*` tag 就出一套六平台包。所以**一个 fix 一个 tag 会把版本刷爆**，
@@ -245,6 +254,16 @@ TLS）→ CONNECT → 对目标再做一次 TLS → 发 `GET /api/v1/client/conf
 - 面板「设置 → 网关出口」三档：`direct`（默认）/ `fallback` / `always`；
   「兜底前先换出口 IP」打开时先调中继 `/rotate`。
 - 出口地址取 `ZCODE_PROXY_URL_EGRESS`，没配就复用 `ZCODE_PROXY_URL_CLAIM`。
+- **领取出口单独可切**（面板同一张卡片）：`proxy`（走中继，默认）/ `direct`（直连）。
+  代理池全挂时切 `direct`，否则领取链路会整条 502；代价是同一 IP 连续领取容易吃 3012。
+
+验证出口确实在变：
+
+```bash
+curl -s -x http://127.0.0.1:3129 https://api.ipify.org   # 住宅代理的 IP
+curl -s http://127.0.0.1:3129/rotate                      # 换一个
+curl -s -x http://127.0.0.1:3129 https://api.ipify.org   # 应该变了
+```
 
 ## 账号备份
 
@@ -254,16 +273,6 @@ TLS）→ CONNECT → 对目标再做一次 TLS → 发 `GET /api/v1/client/conf
 口令丢了文件就废了，没有后门。
 
 
-回退：删掉 `/etc/systemd/system/zcode-gateway.service.d/claim-proxy.conf` 再 restart，
-网关就回到全部直连。
-
-验证出口确实在变：
-
-```bash
-curl -s -x http://127.0.0.1:3129 https://api.ipify.org   # 住宅代理的 IP
-curl -s http://127.0.0.1:3129/rotate                      # 换一个
-curl -s -x http://127.0.0.1:3129 https://api.ipify.org   # 应该变了
-```
 ## 回滚
 
 ```bash

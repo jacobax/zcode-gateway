@@ -264,41 +264,101 @@ async def open_tunnel(entry, target_host, target_port):
 CHECK_PATH = os.environ.get("RELAY_CHECK_PATH", "/api/v1/client/configs")
 
 
-def _probe_blocking(host, port, use_tls, target_host, target_port, path, timeout):
-    """完整走一遍：连代理 →（https 代理先 TLS）→ CONNECT → 目标 TLS → 发一个 GET。
+def _recv_exact(sock, n):
+    buf = b""
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise OSError("连接被关闭")
+        buf += chunk
+    return buf
+
+
+def _socks5_connect(sock, host, port, user, password):
+    """在已连上的 socket 上做 SOCKS5 握手，返回 (ok, 原因)。"""
+    methods = b"\x00\x02" if user else b"\x00"
+    sock.sendall(b"\x05" + bytes([len(methods)]) + methods)
+    resp = _recv_exact(sock, 2)
+    if resp[0] != 5:
+        return False, "SOCKS5 版本不符"
+    if resp[1] == 0x02:
+        if not user:
+            return False, "SOCKS5 要求认证但没配账号"
+        u, p = user.encode(), (password or "").encode()
+        sock.sendall(b"\x01" + bytes([len(u)]) + u + bytes([len(p)]) + p)
+        ar = _recv_exact(sock, 2)
+        if ar[1] != 0:
+            return False, "SOCKS5 认证失败"
+    elif resp[1] != 0x00:
+        return False, f"SOCKS5 方法被拒（0x{resp[1]:02x}）"
+    hb = host.encode()
+    sock.sendall(b"\x05\x01\x00\x03" + bytes([len(hb)]) + hb + port.to_bytes(2, "big"))
+    rep = _recv_exact(sock, 4)
+    if rep[1] != 0:
+        return False, f"SOCKS5 CONNECT 被拒（{rep[1]}）"
+    atyp = rep[3]
+    if atyp == 1:
+        _recv_exact(sock, 4)
+    elif atyp == 4:
+        _recv_exact(sock, 16)
+    elif atyp == 3:
+        _recv_exact(sock, _recv_exact(sock, 1)[0])
+    _recv_exact(sock, 2)
+    return True, ""
+
+
+def _probe_blocking(entry, target_host, target_port, path, timeout):
+    """完整走一遍：连代理 → 打通目标（http/https 用 CONNECT，socks5 用握手）
+    → 对目标做一次真实 TLS → 发一个 GET。
 
     只做 TCP 隧道连通是不够的：能建隧道但转发真实 TLS 就断的"假健康"代理
     在旧体检里全是绿的，实际请求却一个都出不去。
     """
     import socket
 
+    host, port = entry["host"], entry["port"]
+    scheme = entry["scheme"]
+    user, password = entry.get("user"), entry.get("pass")
     t0 = time.time()
+
+    def elapsed():
+        return int((time.time() - t0) * 1000)
+
     sock = None
     try:
         sock = socket.create_connection((host, port), timeout=timeout)
         sock.settimeout(timeout)
-        if use_tls:
+        if scheme == "https":
             ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
             sock = ctx.wrap_socket(sock, server_hostname=host)
 
-        sock.sendall(
-            f"CONNECT {target_host}:{target_port} HTTP/1.1\r\n"
-            f"Host: {target_host}:{target_port}\r\n\r\n".encode()
-        )
-        head = b""
-        while b"\r\n\r\n" not in head:
-            chunk = sock.recv(1024)
-            if not chunk:
-                return False, int((time.time() - t0) * 1000), "CONNECT 无响应"
-            head += chunk
-            if len(head) > 8192:
-                return False, int((time.time() - t0) * 1000), "CONNECT 响应异常"
-        status_line = head.split(b"\r\n", 1)[0].decode("latin1", "replace")
-        if " 200" not in status_line:
-            code = status_line.split(" ")[1] if len(status_line.split(" ")) > 1 else "?"
-            return False, int((time.time() - t0) * 1000), f"CONNECT 被拒（{code}）"
+        if scheme == "socks5":
+            ok, reason = _socks5_connect(sock, target_host, target_port, user, password)
+            if not ok:
+                return False, elapsed(), reason
+        else:
+            sock.sendall(
+                f"CONNECT {target_host}:{target_port} HTTP/1.1\r\n"
+                f"Host: {target_host}:{target_port}\r\n".encode()
+            )
+            if user:
+                cred = f"{user}:{password or ''}".encode()
+                sock.sendall(b"Proxy-Authorization: Basic " + base64.b64encode(cred) + b"\r\n")
+            sock.sendall(b"\r\n")
+            head = b""
+            while b"\r\n\r\n" not in head:
+                chunk = sock.recv(1024)
+                if not chunk:
+                    return False, elapsed(), "CONNECT 无响应"
+                head += chunk
+                if len(head) > 8192:
+                    return False, elapsed(), "CONNECT 响应异常"
+            status_line = head.split(b"\r\n", 1)[0].decode("latin1", "replace")
+            if " 200" not in status_line:
+                code = status_line.split(" ")[1] if len(status_line.split(" ")) > 1 else "?"
+                return False, elapsed(), f"CONNECT 被拒（{code}）"
 
         tctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         tctx.check_hostname = False
@@ -311,23 +371,23 @@ def _probe_blocking(host, port, use_tls, target_host, target_port, path, timeout
         )
         resp = tsock.recv(256)
         if not resp:
-            return False, int((time.time() - t0) * 1000), "目标无响应"
+            return False, elapsed(), "目标无响应"
         line = resp.split(b"\r\n", 1)[0].decode("latin1", "replace")
         parts = line.split(" ")
         if len(parts) < 2 or not parts[1].isdigit():
-            return False, int((time.time() - t0) * 1000), f"响应异常（{line[:32]}）"
+            return False, elapsed(), f"响应异常（{line[:32]}）"
         code = int(parts[1])
         if code >= 500:
-            return False, int((time.time() - t0) * 1000), f"目标 HTTP {code}"
-        return True, int((time.time() - t0) * 1000), ""
+            return False, elapsed(), f"目标 HTTP {code}"
+        return True, elapsed(), ""
     except ssl.SSLError as e:
-        return False, int((time.time() - t0) * 1000), f"TLS 失败（{getattr(e, 'reason', '') or e.__class__.__name__}）"
+        return False, elapsed(), f"TLS 失败（{getattr(e, 'reason', '') or e.__class__.__name__}）"
     except socket.timeout:
-        return False, int((time.time() - t0) * 1000), "超时"
+        return False, elapsed(), "超时"
     except OSError as e:
-        return False, int((time.time() - t0) * 1000), f"连接失败（{e.strerror or e.__class__.__name__}）"
+        return False, elapsed(), f"连接失败（{e.strerror or e.__class__.__name__}）"
     except Exception as e:  # noqa: BLE001 - 体检不能让单条代理拖垮整轮
-        return False, int((time.time() - t0) * 1000), f"失败（{e.__class__.__name__}）"
+        return False, elapsed(), f"失败（{e.__class__.__name__}）"
     finally:
         try:
             if sock is not None:
@@ -340,9 +400,7 @@ async def check_entry(entry):
     th, _, tp = CHECK_TARGET.rpartition(":")
     return await asyncio.to_thread(
         _probe_blocking,
-        entry["host"],
-        entry["port"],
-        entry["scheme"] == "https",
+        entry,
         th,
         int(tp),
         CHECK_PATH,
@@ -639,7 +697,7 @@ async def handle(client_reader, client_writer):
         r = await open_tunnel(entry, target_host, int(target_port))
         if not r:
             continue
-        up_reader, up_writer = r
+        up_reader, up_writer, _ = r
         try:
             client_writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             await client_writer.drain()
@@ -647,7 +705,7 @@ async def handle(client_reader, client_writer):
             up_writer.close()
             return
         tunnels.add(client_writer)
-        log(f"隧道 {entry['scheme']}://{entry_addr(entry)} → {target_host}:{target_port}")
+        log(f"隧道 {entry_addr(entry)} → {target_host}:{target_port}")
         try:
             await asyncio.gather(pipe(client_reader, up_writer), pipe(up_reader, client_writer))
         finally:
