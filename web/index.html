@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ZCode Gateway</title>
-<link rel="stylesheet" href="/style.css?v=19">
+<link rel="stylesheet" href="/style.css?v=20">
 <script>
   // 夜间模式：在首屏渲染前决定主题，避免闪白
   try {
@@ -336,7 +336,7 @@
               <option value="proxy">仅代理</option>
               <option value="proxy_fallback">代理优先，失败回退直连</option>
             </select>
-            <small>「失败回退」只在传输层失败时切另一条出口，拿到响应就不再重试（避免重复领取）。</small>
+            <small><strong>推荐「仅代理」</strong>：活动横幅是按出口 IP 下发的，VPS 直连经常拿不到（看起来像没活动）；而且单 IP 连续领 3~5 个就会被上游频控。走中继时每次领取换一个住宅 IP，两个问题都没有。「失败回退」只在传输层失败时切另一条出口，拿到响应就不再重试（避免重复领取）。</small>
           </label>
           <div class="info-row"><span>中继地址</span><code id="egress-proxy">-</code></div>
         </div>
@@ -539,5 +539,5 @@
 </div>
 
 <div class="toast" id="toast"></div>
-<script src="/app.js?v=19"></script>
+<script src="/app.js?v=20"></script>
 </html>
