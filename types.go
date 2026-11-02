@@ -233,11 +233,22 @@ type OverviewQuota struct {
 	Remaining int64   `json:"remaining"`
 	Percent   float64 `json:"percent"`
 	Accounts  int     `json:"accounts"` // 有额度的账号数
+	// Models 把额度按模型拆开：同一个套餐下各模型的授予/剩余。
+	Models []ModelQuotaStat `json:"models"`
+}
+
+// ModelQuotaStat 是概览页「按模型」的额度行，跨账号汇总。
+type ModelQuotaStat struct {
+	Name      string  `json:"name"`
+	Accounts  int     `json:"accounts"`
+	Granted   int64   `json:"granted"`
+	Remaining int64   `json:"remaining"`
+	Percent   float64 `json:"percent"`
 }
 
 type ServerInfo struct {
-	Version      string `json:"version"`       // 模拟的 ZCode 客户端版本
-	BuildVersion string `json:"buildVersion"`  // 网关自身版本（发布 tag）
+	Version      string `json:"version"`      // 模拟的 ZCode 客户端版本
+	BuildVersion string `json:"buildVersion"` // 网关自身版本（发布 tag）
 	BaseURL      string `json:"baseUrl"`
 	Fingerprint  bool   `json:"fingerprint"`
 	QuotaSeconds int    `json:"quotaSeconds"`

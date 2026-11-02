@@ -7,24 +7,25 @@ import (
 	"testing"
 )
 
-// 概览页的套餐分布与额度合计：只算启用中的账号，禁用号不计入剩余额度。
+// 概览页的套餐分布、额度合计与按模型拆分：只算启用中的账号。
 func TestOverviewPlanAndQuotaStats(t *testing.T) {
 	store := newTestStore(t, "overview")
-	add := func(id, plan string, enabled bool, granted, remaining int64) {
+	add := func(id, plan string, enabled bool, granted, remaining int64, models []QuotaModel) {
 		acc := &Account{
 			ID: id, Label: id, Provider: "zai", Mode: "start-plan",
 			User: UserInfo{ID: "u-" + id}, Enabled: enabled, CreatedAt: 1,
 			Models: map[string]*UsageTotals{},
-			Quota:  Quota{Granted: granted, Remaining: remaining, PlanName: plan},
+			Quota:  Quota{Granted: granted, Remaining: remaining, PlanName: plan, Models: models},
 		}
 		if err := store.AddAccount(acc); err != nil {
 			t.Fatal(err)
 		}
 	}
-	add("a1", "plan-weekend", true, 1000, 600)
-	add("a2", "plan-weekend", true, 1000, 400)
-	add("a3", "plan-old", false, 5000, 5000) // 禁用：不该计入额度合计
-	add("a4", "", true, 0, 0)                // 没套餐
+	add("a1", "plan-weekend", true, 1000, 600, []QuotaModel{{Name: "GLM-5.3", Granted: 1000, Remaining: 600}})
+	add("a2", "plan-weekend", true, 1000, 400, []QuotaModel{{Name: "GLM-5.3", Granted: 1000, Remaining: 400}})
+	// 禁用号：不该计入额度合计，也不该出现在按模型统计里
+	add("a3", "plan-old", false, 5000, 5000, []QuotaModel{{Name: "GLM-5.3-Flash", Granted: 5000, Remaining: 5000}})
+	add("a4", "", true, 0, 0, nil) // 没套餐
 
 	server := NewServer(store, mustUpstream(t), "http://test")
 	rec := httptest.NewRecorder()
@@ -32,6 +33,7 @@ func TestOverviewPlanAndQuotaStats(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("overview: %d %s", rec.Code, rec.Body.String())
 	}
+
 	var overview struct {
 		Accounts struct {
 			Total     int `json:"total"`
@@ -50,6 +52,13 @@ func TestOverviewPlanAndQuotaStats(t *testing.T) {
 				Remaining int64   `json:"remaining"`
 				Percent   float64 `json:"percent"`
 				Accounts  int     `json:"accounts"`
+				Models    []struct {
+					Name      string  `json:"name"`
+					Accounts  int     `json:"accounts"`
+					Granted   int64   `json:"granted"`
+					Remaining int64   `json:"remaining"`
+					Percent   float64 `json:"percent"`
+				} `json:"models"`
 			} `json:"quota"`
 		} `json:"accounts"`
 	}
@@ -57,6 +66,7 @@ func TestOverviewPlanAndQuotaStats(t *testing.T) {
 		t.Fatal(err)
 	}
 	accounts := overview.Accounts
+
 	if accounts.Total != 4 || accounts.Enabled != 3 || accounts.Available != 2 {
 		t.Fatalf("unexpected counts: %+v", accounts)
 	}
@@ -66,10 +76,20 @@ func TestOverviewPlanAndQuotaStats(t *testing.T) {
 	if accounts.Quota.Percent != 50 || accounts.Quota.Accounts != 2 {
 		t.Fatalf("unexpected quota percent/accounts: %+v", accounts.Quota)
 	}
-	if len(accounts.Plans) != 3 {
-		t.Fatalf("expected 3 plan buckets (weekend/old/无套餐), got %d: %+v", len(accounts.Plans), accounts.Plans)
+
+	// 按模型拆分：只有启用中的 GLM-5.3 两个号
+	if len(accounts.Quota.Models) != 1 {
+		t.Fatalf("expected exactly one model row, got %+v", accounts.Quota.Models)
 	}
-	// 按剩余额度降序：plan-old 全禁用 → 0，plan-weekend 1000，无套餐 0
+	model := accounts.Quota.Models[0]
+	if model.Name != "GLM-5.3" || model.Accounts != 2 || model.Granted != 2000 || model.Remaining != 1000 || model.Percent != 50 {
+		t.Fatalf("unexpected model quota row: %+v", model)
+	}
+
+	// 套餐分布：weekend / old / 无套餐 三桶，按剩余降序
+	if len(accounts.Plans) != 3 {
+		t.Fatalf("expected 3 plan buckets, got %+v", accounts.Plans)
+	}
 	if accounts.Plans[0].Name != "plan-weekend" {
 		t.Fatalf("plans should be sorted by remaining desc, got %+v", accounts.Plans)
 	}

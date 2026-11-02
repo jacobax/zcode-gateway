@@ -168,11 +168,27 @@ function renderOverview(data) {
   $('api-base').textContent = data.server?.baseUrl || 'http://127.0.0.1:8787';
   $('nav-account-count').textContent = n(accounts.total);
 
+  const modelRows = quota.models || [];
+  const modelsBody = $('models-table')?.querySelector('tbody');
+  if (modelsBody) modelsBody.innerHTML = modelRows.map(modelRow).join('');
+  if ($('models-empty')) $('models-empty').classList.toggle('hidden', modelRows.length > 0);
+  if ($('models-table')) $('models-table').classList.toggle('hidden', modelRows.length === 0);
+  if ($('model-summary')) $('model-summary').textContent = `${modelRows.length} 个模型`;
   const recent = data.recent || [];
   const tbody = $('recent-table').querySelector('tbody');
   tbody.innerHTML = recent.map(recentRow).join('');
   $('recent-empty').classList.toggle('hidden', recent.length > 0);
   $('recent-table').classList.toggle('hidden', recent.length === 0);
+}
+
+function modelRow(model) {
+  const percent = (model.percent || 0).toFixed(1);
+  return `<tr>
+    <td class="mono ellipsis">${esc(model.name || '-')}</td>
+    <td class="num">${n(model.accounts)}</td>
+    <td class="num">${units(model.remaining)} <span class="muted-cell">/ ${units(model.granted)}</span></td>
+    <td class="num">${percent}%</td>
+  </tr>`;
 }
 
 function planRow(plan) {

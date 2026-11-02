@@ -147,8 +147,16 @@ func (s *Server) refreshQuota(ctx context.Context, acc *Account) error {
 			byPlanName[b.UserPlanID+"|"+strings.ToLower(b.ShowName)] = b
 		}
 	}
-	if balanceErr == nil && len(balances) > 0 {
+	switch {
+	case balanceErr != nil:
+		// 查不到余额：保持 local。这时候不知道有没有额度，谁都不能据此禁用账号。
+		quota.Source = "local"
+	case len(balances) > 0:
 		quota.Source = "api"
+	default:
+		// 上游明确回了空列表：这个号当前没有任何余额/套餐。
+		// 和 local 区分开，自动启停才有可靠依据。
+		quota.Source = "api-empty"
 	}
 	aggregate := map[string]*QuotaModel{}
 	modelOrder := make([]string, 0, 4)
@@ -228,6 +236,7 @@ func (s *Server) refreshQuota(ctx context.Context, acc *Account) error {
 		quota.Error = "" // local accounting is still valid; do not show an API error
 	}
 	prevError := acc.LastError
+	prevPlan, prevGranted := acc.Quota.PlanName, acc.Quota.Granted
 	s.store.UpdateAccount(acc.ID, func(a *Account) {
 		a.Quota = quota
 		if currentPlan != nil {
@@ -265,6 +274,23 @@ func (s *Server) refreshQuota(ctx context.Context, acc *Account) error {
 			s.recordAccountEvent(updated, "额度恢复", fmt.Sprintf("剩余 %d / 共 %d", quota.Remaining, quota.Granted))
 		case updated.LastError == "套餐已过期":
 			s.recordAccountEvent(updated, "套餐过期", "上游返回非 active 状态")
+		}
+	}
+	// 套餐变化也记一条：换套餐、套餐到期、额度到账/清零。
+	// 只在「套餐名变了」或「授予额度 0↔非0」时写，避免 local/api 源切换刷屏。
+	if updated := s.store.GetAccount(acc.ID); updated != nil {
+		newPlan, newGranted := updated.Quota.PlanName, updated.Quota.Granted
+		switch {
+		case newPlan != prevPlan && newPlan == "":
+			s.recordAccountEvent(updated, "套餐到期", fmt.Sprintf("原套餐 %s，授予 %d", prevPlan, prevGranted))
+		case newPlan != prevPlan && prevPlan == "":
+			s.recordAccountEvent(updated, "新套餐", fmt.Sprintf("%s，授予 %d", newPlan, newGranted))
+		case newPlan != prevPlan:
+			s.recordAccountEvent(updated, "套餐变更", fmt.Sprintf("%s → %s", prevPlan, newPlan))
+		case prevGranted == 0 && newGranted > 0:
+			s.recordAccountEvent(updated, "额度到账", fmt.Sprintf("授予 %d", newGranted))
+		case prevGranted > 0 && newGranted == 0:
+			s.recordAccountEvent(updated, "额度清零", fmt.Sprintf("原授予 %d", prevGranted))
 		}
 	}
 	if quota.Granted > 0 && quota.Remaining <= 0 {

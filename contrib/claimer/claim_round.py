@@ -2,15 +2,14 @@
 """ZCode 套餐自动领取 sidecar —— 配合 Ciii-ATM/zcode-gateway 使用。
 
 做三件事：
-  1. 按额度自动启停：有额度（remaining>0）就启用回池；连续 N 轮查不到任何额度
-     （granted==0）就禁用，避免它被选号选中后给客户端返回 1005。
-     只动「脚本自己禁用的」和 lastError 带「迁移时停用」标记的号，人工禁用的一律不碰。
+做四件事：
+  1. 按额度自动启停：有额度（remaining>0）就启用回池；上游明确回了空余额
+     （source=api-empty）且 granted==0，连续 N 轮就禁用，避免它被选号选中后
+     给客户端返回 1005。source=local 表示没查成功，不据此禁用。
   2. 领取：逐个账号（含禁用账号——禁用的只是转发，领卡接口照样能用）问网关有哪些套餐，
      对还没领到的逐条提交领取；验证码用本机 Chromium 跑官方 SDK。
-  3. 记忆：同一 (账号, 套餐) 命中 1001–1005 后 6 小时内不再重试，避免每小时重复解验证码。
-  2. 领取：逐个账号（含禁用账号——禁用的只是转发，领卡接口照样能用）问网关有哪些套餐，
-     对还没领到的逐条提交领取；验证码用本机 Chromium 跑官方 SDK。
-  3. 记忆：同一 (账号, 套餐) 命中 1001–1005 后 6 小时内不再重试，避免每小时重复解验证码。
+  3. 领到就启用：不管当初是谁禁用的，领取成功后立刻 PATCH enabled=true 并刷新额度。
+  4. 记忆：同一 (账号, 套餐) 命中 1001–1005 后 6 小时内不再重试，避免每小时重复解验证码。
 
 关于 claimable：上游 preview 会把套餐列给很多账号，但只在少数账号上标 claimable=true。
 实测（2026-10-30 zcode-v3-start-plan-1030-wk）标 false 的账号强行领取依然成功，
@@ -32,6 +31,7 @@
                         （设了就在每次 claim 前换一个出口；见 contrib/relay）
   ZC_AUTO_MANAGE        1 = 按额度自动启停（默认 1，旧名 ZC_AUTO_ENABLE 仍可用）
   ZC_EMPTY_ROUNDS       连续几轮无额度才禁用，默认 2
+  ZC_ENABLE_AFTER_CLAIM  1 = 领到套餐后自动启用该账号（默认 1）
   ZC_DISABLED_MARKER    额外认这个 lastError 标记的禁用号（默认「迁移时停用」）
 """
 import json
@@ -55,6 +55,9 @@ CLAIM_GAP_SEC = float(os.environ.get("ZC_CLAIM_GAP_SEC", "15"))
 RELAY_ROTATE_URL = os.environ.get("ZC_RELAY_ROTATE_URL", "")
 AUTO_MANAGE = os.environ.get("ZC_AUTO_MANAGE", os.environ.get("ZC_AUTO_ENABLE", "1")) == "1"
 EMPTY_ROUNDS = max(1, int(os.environ.get("ZC_EMPTY_ROUNDS", "2")))
+# 领到套餐后自动启用该账号：不管当初是谁禁用的（脚本/迁移/手动），
+# 只要能领到就说明它又有产能了。
+ENABLE_AFTER_CLAIM = os.environ.get("ZC_ENABLE_AFTER_CLAIM", "1") == "1"
 DISABLED_MARKER = os.environ.get("ZC_DISABLED_MARKER", "迁移时停用")
 DRY = "--dry-run" in sys.argv
 
@@ -219,8 +222,10 @@ def manage_pass(accounts):
         q = a.get("quota") or {}
         remaining = q.get("remaining", 0) or 0
         granted = q.get("granted", 0) or 0
-        updated = q.get("updatedAt", 0) or 0
-        fresh = (now - updated) < 900 and (q.get("source") or "") == "api"
+        # api = 有余额；api-empty = 上游明确回了空列表（确实没套餐）；
+        # local = 没查成功，这时候不能据此禁用账号。
+        source = q.get("source") or ""
+        fresh = (now - updated) < 900 and source in ("api", "api-empty")
 
         if not a.get("enabled") and remaining > 0:
             ours = aid in st["disabled_by_us"]
@@ -368,6 +373,22 @@ def main():
             streak_3012 = 0
             attempts.pop(f"{aid}|{plan_id}", None)
             say(f"    ✅ 领取成功 {name}")
+            if ENABLE_AFTER_CLAIM and not DRY:
+                ecode, eres = api("PATCH", f"/api/accounts/{aid}", {"enabled": True}, timeout=30)
+                if ecode == 200 and eres.get("ok"):
+                    say(f"    ↳ 已启用 {label}")
+                    for item in accounts:
+                        if item.get("id") == aid:
+                            item["enabled"] = True
+                    qstate = load_quota_state()
+                    if aid in qstate["disabled_by_us"]:
+                        qstate["disabled_by_us"].remove(aid)
+                        save_quota_state(qstate)
+                else:
+                    say(f"    ↳ 启用失败 HTTP {ecode} {str(eres)[:60]}")
+                rcode, _ = api("POST", f"/api/accounts/{aid}/refresh", {}, timeout=60)
+                if rcode == 200:
+                    say("    ↳ 已刷新额度")
         else:
             failed += 1
             attempts[f"{aid}|{plan_id}"] = {

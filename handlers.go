@@ -143,6 +143,40 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		}
 		return a.Name < b.Name
 	})
+	// 额度按模型拆开：同一个套餐下每个模型的授予/剩余分别汇总。
+	models := map[string]*ModelQuotaStat{}
+	for _, acc := range accounts {
+		if !acc.Enabled {
+			continue
+		}
+		for _, m := range acc.Quota.Models {
+			name := strings.TrimSpace(m.Name)
+			if name == "" || m.Granted <= 0 {
+				continue
+			}
+			stat := models[name]
+			if stat == nil {
+				stat = &ModelQuotaStat{Name: name}
+				models[name] = stat
+			}
+			stat.Accounts++
+			stat.Granted += m.Granted
+			stat.Remaining += m.Remaining
+		}
+	}
+	for _, stat := range models {
+		if stat.Granted > 0 {
+			stat.Percent = float64(stat.Remaining) / float64(stat.Granted) * 100
+		}
+		overview.Accounts.Quota.Models = append(overview.Accounts.Quota.Models, *stat)
+	}
+	sort.SliceStable(overview.Accounts.Quota.Models, func(i, j int) bool {
+		a, b := overview.Accounts.Quota.Models[i], overview.Accounts.Quota.Models[j]
+		if a.Remaining != b.Remaining {
+			return a.Remaining > b.Remaining
+		}
+		return a.Name < b.Name
+	})
 	quotaTotal := &overview.Accounts.Quota
 	quotaTotal.Used = quotaTotal.Granted - quotaTotal.Remaining
 	if quotaTotal.Used < 0 {

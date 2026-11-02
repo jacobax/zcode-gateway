@@ -120,6 +120,24 @@ zcode-claimer.timer（每小时 :17）──► 面板管理接口 ──► 上
 - **token 不回显**：`GET /api/settings` 只返回掩码（`sk-zc…abcd`）与 `proxyTokenSet`，
   明文走 `GET /api/settings/token`；面板里点「复制」才去取一次。留空＝不修改，
   点「清除」再保存才会清空。
+
+## 账号自动启停
+
+`contrib/claimer` 每轮先跑 `manage_pass`，再走领取。判定依据是账号的额度状态：
+
+| `quota.source` | 含义 | 自动启停怎么用 |
+|---|---|---|
+| `api` | 上游返回了余额，有额度 | 可据此启用 |
+| `api-empty` | 上游明确回了空列表（确实没套餐） | 连续 `ZC_EMPTY_ROUNDS` 轮就禁用 |
+| `local` | 没查成功（网络/鉴权），额度未知 | **不据此禁用**，避免误杀 |
+
+`api-empty` 是 v1.8.0 才分出来的。之前只有 `api` / `local` 两种，没套餐的号永远是 `local`，
+脚本的「数据新鲜」条件永远不满足，于是这批号一直没被自动禁用——概览页那 17 个「无套餐但启用」
+就是这么攒下来的。
+
+领取成功后脚本会 PATCH `enabled=true` 并刷新额度（`ZC_ENABLE_AFTER_CLAIM=0` 可关）：
+不管当初是谁禁用的（脚本/迁移/手动），只要能领到就说明这个号又有产能了。
+
 ## 发版节奏
 
 `release.yml` 是 tag 驱动的：推一个 `v*` tag 就出一套六平台包。所以**一个 fix 一个 tag 会把版本刷爆**，
