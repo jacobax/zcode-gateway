@@ -274,6 +274,61 @@ def _recv_exact(sock, n):
     return buf
 
 
+class _TLSOverStream:
+    """在已有流（可能是套在代理 TLS 里的 SSLSocket）上再做一层 TLS。
+
+    坑：Python 里对 SSLSocket 直接 ctx.wrap_socket() 不会嵌套 TLS —— 外层会拿底层 fd
+    裸发数据，目标 ClientHello 变成明文，对端只能回 alert（INVALID_ALERT /
+    UNEXPECTED_MESSAGE）。必须用 MemoryBIO 自己泵字节。
+    """
+
+    def __init__(self, sock, ctx, server_hostname):
+        self.sock = sock
+        self.inbio = ssl.MemoryBIO()
+        self.outbio = ssl.MemoryBIO()
+        self.obj = ctx.wrap_bio(self.inbio, self.outbio, server_hostname=server_hostname)
+        while True:
+            try:
+                self.obj.do_handshake()
+                break
+            except ssl.SSLWantReadError:
+                self._flush()
+                self._fill()
+            else:
+                self._flush()
+        self._flush()
+
+    def _flush(self):
+        data = self.outbio.read()
+        if data:
+            self.sock.sendall(data)
+
+    def _fill(self):
+        data = self.sock.recv(16384)
+        if not data:
+            raise OSError("连接被关闭")
+        self.inbio.write(data)
+
+    def sendall(self, data):
+        self.obj.write(data)
+        self._flush()
+
+    def recv(self, n):
+        while True:
+            try:
+                return self.obj.read(n)
+            except ssl.SSLWantReadError:
+                self._flush()
+                self._fill()
+
+    def close(self):
+        try:
+            self.sock.close()
+        except Exception:
+            pass
+
+
+
 def _socks5_connect(sock, host, port, user, password):
     """在已连上的 socket 上做 SOCKS5 握手，返回 (ok, 原因)。"""
     methods = b"\x00\x02" if user else b"\x00"
@@ -363,7 +418,7 @@ def _probe_blocking(entry, target_host, target_port, path, timeout):
         tctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         tctx.check_hostname = False
         tctx.verify_mode = ssl.CERT_NONE
-        tsock = tctx.wrap_socket(sock, server_hostname=target_host)
+        tsock = _TLSOverStream(sock, tctx, target_host)
         tsock.sendall(
             f"GET {path} HTTP/1.1\r\nHost: {target_host}\r\n"
             f"User-Agent: ZCode/{os.environ.get('ZCODE_APP_VERSION', '3.16.3')}\r\n"

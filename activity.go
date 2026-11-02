@@ -138,7 +138,7 @@ func (s *Server) reportActivation(ctx context.Context, acc *Account) []string {
 		data, _ := json.Marshal(body)
 		headers := map[string]string{"Content-Type": "application/json", "User-Agent": "ZCode/" + appVersion}
 		callCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
-	resp, err := doRequest(callCtx, s.claimHTTPDoer(), "POST", zcodeAPIBase+"/api/v1/event/report", headers, data)
+	resp, err := s.claimRequest(callCtx, "POST", zcodeAPIBase+"/api/v1/event/report", headers, data)
 		if err != nil {
 			cancel()
 			warnings = append(warnings, "激活事件: "+err.Error())
@@ -206,7 +206,7 @@ func (s *Server) zcodeAPICall(ctx context.Context, acc *Account, method, path st
 	}
 	callCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	resp, err := doRequest(callCtx, s.claimHTTPDoer(), method, target, headers, body)
+	resp, err := s.claimRequest(callCtx, method, target, headers, body)
 	if err != nil {
 		return nil, 0, err
 	}

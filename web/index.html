@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ZCode Gateway</title>
-<link rel="stylesheet" href="/style.css?v=14">
+<link rel="stylesheet" href="/style.css?v=15">
 <script>
   // 夜间模式：在首屏渲染前决定主题，避免闪白
   try {
@@ -330,10 +330,12 @@
           <label class="field">
             <span>领取 / 活动走哪条出口</span>
             <select class="input" id="setting-claim-egress">
-              <option value="proxy">走代理池中继（默认）</option>
-              <option value="direct">直连</option>
+              <option value="direct">仅直连</option>
+              <option value="direct_fallback">直连优先，失败回退代理</option>
+              <option value="proxy">仅代理</option>
+              <option value="proxy_fallback">代理优先，失败回退直连</option>
             </select>
-            <small>代理池全挂时切「直连」，否则领取链路会整条 502；直连的代价是同一 IP 连续领取容易吃 3012。</small>
+            <small>「失败回退」只在传输层失败时切另一条出口，拿到响应就不再重试（避免重复领取）。</small>
           </label>
           <div class="info-row"><span>中继地址</span><code id="egress-proxy">-</code></div>
         </div>
@@ -532,5 +534,5 @@
 
 <div class="toast" id="toast"></div>
 <script src="/app.js?v=14"></script>
-</body>
+<script src="/app.js?v=15"></script>
 </html>

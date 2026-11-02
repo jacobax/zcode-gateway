@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	fhttp "github.com/bogdanfinn/fhttp"
 	"net/url"
 	"os"
@@ -121,6 +122,11 @@ func (u *Upstream) ClaimProxyURL() string {
 	return u.claimProxyURL
 }
 
+// HasClaimProxy 表示领取是否配了独立出口（否则 Claim() 和直连是同一个客户端）。
+func (u *Upstream) HasClaimProxy() bool {
+	return u.claimProxyURL != ""
+}
+
 // HasEgress 表示是否配置了可选的模型出口（本地中继或独立代理）。
 func (u *Upstream) HasEgress() bool {
 	return u.egressClient != nil
@@ -132,12 +138,48 @@ func (u *Upstream) EgressProxyURL() string {
 }
 
 
-// claimHTTPDoer 返回领取/活动调用该用的 HTTPDoer：面板「领取出口」可以选直连或走中继。
-func (s *Server) claimHTTPDoer() HTTPDoer {
-	if s.store.Settings().ClaimEgress == "direct" {
-		return s.upstream
+// claimDoers 按面板设置排出领取/活动调用的出口顺序：
+//   direct          仅直连
+//   direct_fallback 直连优先，传输层失败再走代理
+//   proxy           仅代理
+//   proxy_fallback  代理优先，传输层失败再直连
+func (s *Server) claimDoers() []HTTPDoer {
+	direct := HTTPDoer(s.upstream)
+	if !s.upstream.HasClaimProxy() {
+		return []HTTPDoer{direct}
 	}
-	return s.upstream.Claim()
+	proxy := s.upstream.Claim()
+	switch s.store.Settings().ClaimEgress {
+	case "direct":
+		return []HTTPDoer{direct}
+	case "direct_fallback":
+		return []HTTPDoer{direct, proxy}
+	case "proxy_fallback":
+		return []HTTPDoer{proxy, direct}
+	default: // "proxy" 或未设置
+		return []HTTPDoer{proxy}
+	}
+}
+
+// claimRequest 依次尝试候选出口。只在传输层失败时回退——一旦拿到响应就返回，
+// 免得把一次领取提交两次。
+func (s *Server) claimRequest(ctx context.Context, method, target string, headers map[string]string, body []byte) (*fhttp.Response, error) {
+	doers := s.claimDoers()
+	var lastErr error
+	for i, doer := range doers {
+		resp, err := doRequest(ctx, doer, method, target, headers, body)
+		if err == nil {
+			if i > 0 {
+				log.Printf("领取出口回退成功（第 %d 个候选）", i+1)
+			}
+			return resp, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return nil, lastErr
 }
 // claimDoer 让领取/活动这类调用走独立出口，主流量（模型请求、额度刷新）保持直连。
 type claimDoer struct{ c tls_client.HttpClient }

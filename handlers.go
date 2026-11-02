@@ -511,7 +511,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			}
 			if body.ClaimEgress != nil {
 				switch *body.ClaimEgress {
-				case "direct", "proxy":
+				case "direct", "direct_fallback", "proxy", "proxy_fallback":
 					st.ClaimEgress = *body.ClaimEgress
 				}
 			}

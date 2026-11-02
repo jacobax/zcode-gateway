@@ -157,6 +157,12 @@ TLS）→ CONNECT → 对目标再做一次 TLS → 发 `GET /api/v1/client/conf
    `ValueError`**——隧道刚建好就断。这个 bug 跟代理质量无关，任何代理都转发不出去，
    所以之前"代理全绿但请求全 502"是两个问题叠在一起。改成三元组解包后，
    `curl -x http://127.0.0.1:3129 https://zcode.z.ai/...` 从 HTTP 000 变成 200。
+3. **Python 不会嵌套 TLS**：对已经是 SSLSocket 的连接再 `ctx.wrap_socket()`，外层会拿底层
+   fd 裸发数据——目标的 ClientHello 变成明文，对端只能回 `INVALID_ALERT` /
+   `UNEXPECTED_MESSAGE`。这就是「curl 能过、我们体检不过」的原因（curl 自己会嵌套）。
+   修法是用 `ssl.MemoryBIO` + `SSLObject` 手动泵字节（见 `_TLSOverStream`）。
+   注意这只影响**体检探针**；中继的转发路径是纯字节管道，不受影响。
+
 ## 发版节奏
 
 `release.yml` 是 tag 驱动的：推一个 `v*` tag 就出一套六平台包。所以**一个 fix 一个 tag 会把版本刷爆**，
@@ -254,8 +260,9 @@ TLS）→ CONNECT → 对目标再做一次 TLS → 发 `GET /api/v1/client/conf
 - 面板「设置 → 网关出口」三档：`direct`（默认）/ `fallback` / `always`；
   「兜底前先换出口 IP」打开时先调中继 `/rotate`。
 - 出口地址取 `ZCODE_PROXY_URL_EGRESS`，没配就复用 `ZCODE_PROXY_URL_CLAIM`。
-- **领取出口单独可切**（面板同一张卡片）：`proxy`（走中继，默认）/ `direct`（直连）。
-  代理池全挂时切 `direct`，否则领取链路会整条 502；代价是同一 IP 连续领取容易吃 3012。
+- **领取出口四档**（面板同一张卡片）：`direct` 仅直连 / `direct_fallback` 直连优先、失败回退代理 /
+  `proxy` 仅代理 / `proxy_fallback` 代理优先、失败回退直连。回退只在**传输层失败**时触发，
+  拿到响应就不再重试，避免把一次领取提交两次。
 
 验证出口确实在变：
 
