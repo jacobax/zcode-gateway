@@ -102,9 +102,27 @@ func claim3012Retries() int {
 	return 2
 }
 
-// rotateClaimEgress 让中继换一个出口。没配中继（领取走直连）时什么也不做。
+// claimSolverProxy 返回解验证码时 Chromium 该走的出口。
+//
+// 必须和 claimDoers() 的第一跳一致：阿里云的 captchaVerifyParam 绑 IP，
+// 在 A 网解出来的 token 拿到 B 网去用，上游直接判 3012。
+//   direct / direct_fallback → 领取先走直连，solver 也得直连（返回 ""）
+//   proxy / proxy_fallback   → 领取先走中继，solver 也走中继
+func (s *Server) claimSolverProxy() string {
+	if !s.upstream.HasClaimProxy() {
+		return ""
+	}
+	switch s.store.Settings().ClaimEgress {
+	case "direct", "direct_fallback":
+		return ""
+	default:
+		return s.upstream.ClaimProxyURL()
+	}
+}
+
+// rotateClaimEgress 让中继换一个出口。走直连（或没配中继）时什么也不做。
 func (s *Server) rotateClaimEgress(ctx context.Context) {
-	base := strings.TrimRight(s.upstream.ClaimProxyURL(), "/")
+	base := strings.TrimRight(s.claimSolverProxy(), "/")
 	if base == "" {
 		return
 	}
@@ -121,8 +139,7 @@ func (s *Server) rotateClaimEgress(ctx context.Context) {
 }
 
 // solveCaptcha 在 Chromium 里跑官方 SDK 拿 captchaVerifyParam。
-// 必须让浏览器也走领取用的那个出口（HTTP_PROXY 指向中继），否则 token 和
-// 领取请求来自两个 IP，上游判 3012。
+// 出口由 claimSolverProxy 决定，和领取保持同一个 IP。
 func (s *Server) solveCaptcha(ctx context.Context, scene, region, prefix string) (string, error) {
 	dir := captchaSolverDir()
 	if dir == "" {
@@ -131,7 +148,7 @@ func (s *Server) solveCaptcha(ctx context.Context, scene, region, prefix string)
 	cmd := exec.CommandContext(ctx, "node", "solver_pw.js", scene, region, prefix)
 	cmd.Dir = dir
 	env := os.Environ()
-	if proxy := s.upstream.ClaimProxyURL(); proxy != "" {
+	if proxy := s.claimSolverProxy(); proxy != "" {
 		env = append(env, "HTTP_PROXY="+proxy, "HTTPS_PROXY="+proxy, "NO_PROXY=")
 	}
 	cmd.Env = env

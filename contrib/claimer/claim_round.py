@@ -77,6 +77,9 @@ if not RELAY_PROXY_URL and RELAY_ROTATE_URL:
 # 留空或 "*" = 不限时段。额度启停（manage_pass）不受影响，照常每小时跑。
 CLAIM_WINDOW = os.environ.get("ZC_CLAIM_WINDOW", "19,20")
 CLAIM_TZ = os.environ.get("ZC_CLAIM_TZ", "Asia/Shanghai")
+# 领取出口模式，登录后从面板读。决定 solver 该不该也走中继（必须和领取同 IP）。
+CLAIM_EGRESS = os.environ.get("ZC_CLAIM_EGRESS", "proxy")
+CLAIM_TZ = os.environ.get("ZC_CLAIM_TZ", "Asia/Shanghai")
 # 失败缓存有效期：命中 1001–1005 / 3012 后多久内不再重试（避免每小时重复解验证码）
 RETRY_SKIP_HOURS = float(os.environ.get("ZC_RETRY_SKIP_HOURS", "6"))
 AUTO_MANAGE = os.environ.get("ZC_AUTO_MANAGE", os.environ.get("ZC_AUTO_ENABLE", "1")) == "1"
@@ -196,8 +199,8 @@ def solve_captcha(scene, region, prefix, proxy=""):
 
 
 def rotate_relay():
-    """让本地中继换一个出口 IP；没配就什么都不做。"""
-    if not RELAY_ROTATE_URL:
+    """让中继换一个出口 IP。走直连（或没配中继）时什么也不做。"""
+    if not RELAY_ROTATE_URL or not solver_proxy():
         return
     try:
         with urllib.request.urlopen(RELAY_ROTATE_URL, timeout=8) as r:
@@ -335,19 +338,29 @@ def manage_pass(accounts):
     return enabled, disabled
 
 
-def fetch_claim_window():
-    """领取时段优先读面板设置（设置页可改），其次才是 env。
+def fetch_claim_settings():
+    """从面板读领取时段和出口模式。
 
-    放在登录之后调用：面板是唯一真相，改完不用再去改 /etc/zcode-claimer.env
-    再重启 timer。
+    面板是唯一真相：改完不用再动 /etc/zcode-claimer.env、不用重启 timer。
+    出口模式尤其重要——solver 必须和领取走同一个 IP，否则 captchaVerifyParam
+    绑的 IP 对不上，上游判 3012。
     """
-    global CLAIM_WINDOW
+    global CLAIM_WINDOW, CLAIM_EGRESS
     status, res = api("GET", "/api/settings", timeout=20)
     if status != 200 or not isinstance(res, dict):
         return
-    win = ((res.get("settings") or {}).get("claimWindow"))
-    if win is not None:
-        CLAIM_WINDOW = str(win)
+    st = res.get("settings") or {}
+    if st.get("claimWindow") is not None:
+        CLAIM_WINDOW = str(st.get("claimWindow"))
+    if st.get("claimEgress"):
+        CLAIM_EGRESS = str(st.get("claimEgress"))
+
+
+def solver_proxy():
+    """解验证码时 Chromium 该走的出口，和领取的第一跳保持一致。"""
+    if CLAIM_EGRESS in ("direct", "direct_fallback"):
+        return ""
+    return RELAY_PROXY_URL
 
 
 def in_claim_window():
@@ -394,7 +407,7 @@ def main():
         say(f"ERROR: 面板登录失败 HTTP {status} {str(res)[:120]}")
         return 1
     # 时段以面板设置为准（登录后才能读），env 只作兜底
-    fetch_claim_window()
+    fetch_claim_settings()
 
     status, res = api("GET", "/api/accounts")
     if status != 200:
@@ -480,10 +493,12 @@ def main():
                 time.sleep(CLAIM_GAP_SEC)
             # 顺序不能反：先换出口，再让 solver 用这个出口解验证码，最后用同一个
             # 出口领取。captchaVerifyParam 绑 IP，三步跨了网就是 3012。
+            # 出口模式跟面板一致：直连模式下 solver 也必须直连。
+            proxy = solver_proxy()
             rotate_relay()
             param = ""
             if scene and region and prefix:
-                param = solve_captcha(scene, region, prefix, proxy=RELAY_PROXY_URL)
+                param = solve_captcha(scene, region, prefix, proxy=proxy)
                 if not param:
                     st, code = 0, "solve-failed"
                     break
