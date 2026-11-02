@@ -40,5 +40,8 @@ jobs:
           # 顶层监听引用时 ReferenceError，整页白屏（右下角永远「连接中 v-」）。
           # 用 DOM 桩把 app.js 真跑一遍才抓得到这类错。
           node scripts/web-smoke.js web/app.js
+          # 设置页「只写保存、不写还原」的检查：控件刷新后停在默认值，
+          # 用户再点一次保存就把后端覆盖了（claimEgress 踩过）。
+          node scripts/web-settings-check.js web/app.js
       - name: 扫描凭据与私人信息
         run: bash scripts/scan-secrets.sh

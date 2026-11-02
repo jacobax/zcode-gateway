@@ -894,6 +894,14 @@ async function loadSettings() {
     if ($('setting-egress-rotate')) $('setting-egress-rotate').checked = !!data.settings.egressRotate;
     if ($('egress-proxy')) $('egress-proxy').textContent = data.egressProxy || '未配置（需要 ZCODE_PROXY_URL_CLAIM 或 ZCODE_PROXY_URL_EGRESS）';
     if ($('egress-state')) $('egress-state').textContent = data.egressAvailable ? '可用' : '未配置';
+    if ($('setting-claim-egress')) {
+      // 后端空值 = 走代理（claimDoers 的默认分支），别把它显示成「仅直连」。
+      // 之前漏了这段，页面刷新后下拉一直停在第一项「仅直连」——用户再点一次
+      // 「保存设置」就把后端真改成 direct 了。
+      const want = data.settings.claimEgress || 'proxy';
+      $('setting-claim-egress').value = want;
+      if ($('setting-claim-egress').value !== want) $('setting-claim-egress').value = 'proxy';
+    }
     if ($('setting-claim-window')) {
       $('setting-claim-window').value = data.settings.claimWindow || '';
       updateClaimWindowHint();
