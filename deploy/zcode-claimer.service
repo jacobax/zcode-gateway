@@ -9,8 +9,11 @@ EnvironmentFile=/etc/zcode-claimer.env
 ExecStart=/usr/bin/python3 /opt/zcode-claimer/claim_round.py
 Nice=10
 IOSchedulingClass=idle
-# 一轮最多解 ZC_MAX_SOLVES 次验证码，每次 ~7s，留足余量
-TimeoutStartSec=1800
+# 单轮要把所有可领的号都过一遍：58 个号 ×（换出口 + 解验证码 + 领取）≈ 40 分钟，
+# 遇到 3012 重试更久。留到 55 分钟，仍在一小时一轮的窗口内。
+# 调大 ZC_MAX_SOLVES 就得同步放宽这里，否则 systemd 会半路 SIGTERM
+# （现象：日志里 "start operation timed out"，一轮跑到一半没了）。
+TimeoutStartSec=3300
 # 求解时 Chromium 峰值约 590MB，给个硬上限：宁可这一轮被杀，也不要拖垮网关
 MemoryMax=700M
 MemorySwapMax=1G
