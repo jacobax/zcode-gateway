@@ -368,6 +368,66 @@ func mapKeys(m map[string]bool) []string {
 	return out
 }
 
+// normalizeClaimWindow 校验并规范化领取时段写法。
+//
+//	"19,20"  → "19,20"
+//	"19-21"  → "19,20,21"
+//	"23-2"   → "0,1,2,23"（跨零点）
+//	""/"*"   → ""（不限时段）
+//
+// 非法输入返回 ok=false，调用方保持原值，别让手滑把 claimer 变成「每小时都跑」。
+func normalizeClaimWindow(raw string) (string, bool) {
+	spec := strings.TrimSpace(raw)
+	if spec == "" || spec == "*" {
+		return "", true
+	}
+	hours := map[int]bool{}
+	for _, part := range strings.Split(strings.ReplaceAll(spec, " ", ""), ",") {
+		if part == "" {
+			continue
+		}
+		if strings.Contains(part, "-") {
+			lo, hi, _ := strings.Cut(part, "-")
+			a, err1 := strconv.Atoi(lo)
+			b, err2 := strconv.Atoi(hi)
+			if err1 != nil || err2 != nil || a < 0 || a > 23 || b < 0 || b > 23 {
+				return "", false
+			}
+			if a <= b {
+				for h := a; h <= b; h++ {
+					hours[h] = true
+				}
+			} else {
+				for h := a; h <= 23; h++ {
+					hours[h] = true
+				}
+				for h := 0; h <= b; h++ {
+					hours[h] = true
+				}
+			}
+			continue
+		}
+		n, err := strconv.Atoi(part)
+		if err != nil || n < 0 || n > 23 {
+			return "", false
+		}
+		hours[n] = true
+	}
+	if len(hours) == 0 {
+		return "", true
+	}
+	out := make([]int, 0, len(hours))
+	for h := range hours {
+		out = append(out, h)
+	}
+	sort.Ints(out)
+	parts := make([]string, 0, len(out))
+	for _, h := range out {
+		parts = append(parts, strconv.Itoa(h))
+	}
+	return strings.Join(parts, ","), true
+}
+
 func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:

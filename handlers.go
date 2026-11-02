@@ -487,6 +487,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			EgressMode         *string `json:"egressMode"`
 			EgressRotate       *bool   `json:"egressRotate"`
 			ClaimEgress        *string `json:"claimEgress"`
+			ClaimWindow        *string `json:"claimWindow"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			writeError(w, 400, "invalid json")
@@ -537,6 +538,13 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 				switch *body.ClaimEgress {
 				case "direct", "direct_fallback", "proxy", "proxy_fallback":
 					st.ClaimEgress = *body.ClaimEgress
+				}
+			}
+			if body.ClaimWindow != nil {
+				// 只接受 "19,20" / "19-21" / "" 这类写法，别让非法串把
+				// claimer 静默变成「不限时段」。
+				if normalized, ok := normalizeClaimWindow(*body.ClaimWindow); ok {
+					st.ClaimWindow = normalized
 				}
 			}
 		})

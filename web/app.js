@@ -265,6 +265,7 @@ async function loadAccounts() {
     const data = await api('/api/accounts');
     state.accounts = data.items || [];
     renderAccounts();
+    updateClaimWindowHint();
     renderLogAccountOptions();
   } catch (error) {
     toast(error.message, true);
@@ -393,11 +394,9 @@ function accountRow(account, index) {
       <div class="${rateClass(rate)}">${rate.toFixed(1)}%</div>
     </td>
     <td>
-    <td>
       <select class="input compact" data-concurrency="${esc(account.id)}" title="生效并发：${n(account.concurrencyEffective || account.concurrency || 1)}">
         ${[0,1,2,3,4,5].map((v) => `<option value="${v}" ${Number(account.concurrency || 0) === v ? 'selected' : ''}>${v === 0 ? '跟随' : v}</option>`).join('')}
       </select>
-    </td>
     </td>
     <td class="muted-cell">${relative(today.lastUsed || account.lastUsedAt)}</td>
     <td class="actions">
@@ -472,6 +471,53 @@ function renderClaimProgress(job) {
   } else {
     btn.disabled = false;
     btn.textContent = '领取全部';
+  }
+}
+
+// 领取时段建议：按账号数估一轮要跑多久，提醒两轮间隔够不够。
+// 单号 ≈ 40 秒（换出口 + 解验证码 + 领取 + 刷新额度）。
+const CLAIM_SEC_PER_ACCOUNT = 40;
+
+function parseClaimWindow(raw) {
+  const hours = new Set();
+  for (const part of String(raw || '').replace(/\s/g, '').split(',')) {
+    if (!part) continue;
+    if (part.includes('-')) {
+      const [lo, hi] = part.split('-').map((x) => parseInt(x, 10));
+      if (Number.isNaN(lo) || Number.isNaN(hi)) continue;
+      for (let h = lo; h <= hi; h++) hours.add(((h % 24) + 24) % 24);
+    } else {
+      const h = parseInt(part, 10);
+      if (!Number.isNaN(h)) hours.add(((h % 24) + 24) % 24);
+    }
+  }
+  return [...hours].sort((a, b) => a - b);
+}
+
+function updateClaimWindowHint() {
+  const el = $('claim-window-hint');
+  if (!el) return;
+  const count = (state.accounts || []).length;
+  const minutes = Math.max(1, Math.ceil((count * CLAIM_SEC_PER_ACCOUNT) / 60));
+  const hours = parseClaimWindow($('setting-claim-window').value);
+  const head = `当前 ${count} 个账号，一轮约 ${minutes} 分钟（每个号约 ${CLAIM_SEC_PER_ACCOUNT} 秒）。`;
+  if (!hours.length) {
+    el.textContent = `${head} 留空 = 每小时都尝试领取，解验证码的开销会一直花下去。`;
+    return;
+  }
+  if (hours.length === 1) {
+    el.textContent = `${head} ⚠ 只有一个时段 ${hours[0]}:xx —— 来不及重试的号要等第二天，建议至少排两个。`;
+    return;
+  }
+  let minGap = Infinity;
+  for (let i = 1; i < hours.length; i++) {
+    minGap = Math.min(minGap, (hours[i] - hours[i - 1]) * 60);
+  }
+  if (minutes > minGap) {
+    el.textContent = `${head} ⚠ 相邻两轮只隔 ${minGap} 分钟，比预计耗时还短 —— `
+      + `后一轮会等前一轮跑完（systemd 不会并发），实际只剩一轮的量。建议加一个时段或错开。`;
+  } else {
+    el.textContent = `${head} 相邻两轮间隔 ${minGap} 分钟，够跑完还能重试。`;
   }
 }
 
@@ -849,6 +895,11 @@ async function loadSettings() {
     if ($('setting-egress-rotate')) $('setting-egress-rotate').checked = !!data.settings.egressRotate;
     if ($('egress-proxy')) $('egress-proxy').textContent = data.egressProxy || '未配置（需要 ZCODE_PROXY_URL_CLAIM 或 ZCODE_PROXY_URL_EGRESS）';
     if ($('egress-state')) $('egress-state').textContent = data.egressAvailable ? '可用' : '未配置';
+    if ($('setting-claim-window')) {
+      $('setting-claim-window').value = data.settings.claimWindow || '';
+      updateClaimWindowHint();
+    }
+    if ($('egress-state')) $('egress-state').textContent = data.egressAvailable ? '可用' : '未配置';
     loadUpdate(false);
     if ($('setting-concurrency')) $('setting-concurrency').value = String(data.settings.defaultConcurrency || 1);
     const sourceLabels = { env: '来自环境变量', panel: '面板保存的密码', generated: '本次启动随机生成（已写入面板）', none: '未设置' };
@@ -987,12 +1038,12 @@ async function saveSettings() {
       storeBodies: $('setting-bodies').checked,
       fingerprint: $('setting-fingerprint').checked,
       promptMode: $('setting-prompt-mode').value,
-      uaProfile: $('setting-ua').value,
+      claimEgress: $('setting-claim-egress').value,
+      claimWindow: $('setting-claim-window') ? $('setting-claim-window').value.trim() : '',
       quotaIntervalSec: Number($('setting-quota').value) || 30,
       defaultConcurrency: Number($('setting-concurrency').value) || 1,
       autoUpdate: $('setting-autoupdate').checked,
       egressMode: $('setting-egress-mode').value,
-      claimEgress: $('setting-claim-egress').value,
       egressRotate: $('setting-egress-rotate').checked,
     };
     // 明文 token 不回显：只有用户真的输入了、或者点了「清除」才提交这个字段。
@@ -1345,6 +1396,9 @@ $('open-auth-url').addEventListener('click', () => {
 });
 $('submit-callback').addEventListener('click', submitCallback);
 $('save-settings').addEventListener('click', saveSettings);
+if ($('setting-claim-window')) {
+  $('setting-claim-window').addEventListener('input', updateClaimWindowHint);
+}
 $('check-update').addEventListener('click', () => loadUpdate(true));
 $('activity-captcha-fetch').addEventListener('click', fetchCaptchaParam);
 $('generate-token').addEventListener('click', generateProxyToken);

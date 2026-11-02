@@ -335,6 +335,21 @@ def manage_pass(accounts):
     return enabled, disabled
 
 
+def fetch_claim_window():
+    """领取时段优先读面板设置（设置页可改），其次才是 env。
+
+    放在登录之后调用：面板是唯一真相，改完不用再去改 /etc/zcode-claimer.env
+    再重启 timer。
+    """
+    global CLAIM_WINDOW
+    status, res = api("GET", "/api/settings", timeout=20)
+    if status != 200 or not isinstance(res, dict):
+        return
+    win = ((res.get("settings") or {}).get("claimWindow"))
+    if win is not None:
+        CLAIM_WINDOW = str(win)
+
+
 def in_claim_window():
     """现在是不是活动开放时段。True 才真去解验证码领取。
 
@@ -378,6 +393,8 @@ def main():
     if status != 200:
         say(f"ERROR: 面板登录失败 HTTP {status} {str(res)[:120]}")
         return 1
+    # 时段以面板设置为准（登录后才能读），env 只作兜底
+    fetch_claim_window()
 
     status, res = api("GET", "/api/accounts")
     if status != 200:

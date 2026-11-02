@@ -206,6 +206,9 @@ type Settings struct {
 	// ClaimEgress 决定领取/活动调用走哪条出口：""/proxy（默认，走中继）或 direct（直连）。
 	// 中继代理池全挂时切 direct，避免领取链路整条瘫掉。
 	ClaimEgress string `json:"claimEgress,omitempty"`
+	// ClaimWindow 是自动领取的时段（北京时间小时），如 "19,20" 或 "19-21"；
+	// 空 = 不限时段。claim_round.py 从这里读，不再依赖它自己的 env。
+	ClaimWindow string `json:"claimWindow,omitempty"`
 }
 
 type Overview struct {

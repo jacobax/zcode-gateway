@@ -49,7 +49,7 @@ func NewStore(dir string) (*Store, error) {
 	}
 	s := &Store{
 		dir:      dir,
-		settings: Settings{Fingerprint: true, StoreBodies: true, QuotaIntervalSec: 30, DefaultConcurrency: 1, PromptMode: "append", UAProfile: "zcode"},
+		settings: Settings{Fingerprint: true, StoreBodies: true, QuotaIntervalSec: 30, DefaultConcurrency: 1, PromptMode: "append", UAProfile: "zcode", ClaimWindow: "19,20"},
 	}
 	if err := s.loadMasterKey(); err != nil {
 		return nil, err

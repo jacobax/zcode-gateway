@@ -188,6 +188,37 @@ code { font-family: var(--mono); font-size: 12px; }
 .table .num { text-align: right; font-variant-numeric: tabular-nums; }
 .w-priority { width: 82px; }
 .w-actions { width: 190px; }
+
+/* 账号表：横向滚动条不能只在表格最底部——账号多的时候得先滚到底才够得着。
+   把容器限高 + 表头吸顶，横向滚动条就一直在可视区底部。
+   账号列再左吸，横向滑动时仍然知道自己在看哪个号。 */
+.accounts-scroll {
+  max-height: calc(100vh - 250px);
+  overflow: auto;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+}
+.accounts-scroll .table { min-width: 1180px; }
+.accounts-scroll thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--surface-2);
+}
+.accounts-scroll th:nth-child(2),
+.accounts-scroll td:nth-child(2) {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--surface);
+  box-shadow: 1px 0 0 var(--border);
+}
+.accounts-scroll thead th:nth-child(2) { z-index: 3; background: var(--surface-2); }
+.accounts-scroll tbody tr:hover td:nth-child(2) { background: #f8fafd; }
+html[data-theme="dark"] .accounts-scroll th:nth-child(2),
+html[data-theme="dark"] .accounts-scroll td:nth-child(2) { background: var(--surface); }
+html[data-theme="dark"] .accounts-scroll thead th:nth-child(2) { background: var(--surface-2); }
+html[data-theme="dark"] .accounts-scroll tbody tr:hover td:nth-child(2) { background: rgba(255, 255, 255, 0.04); }
 .actions { display: flex; gap: 4px; justify-content: flex-end; }
 .actions .btn { height: 28px; padding: 0 8px; font-size: 12px; }
 

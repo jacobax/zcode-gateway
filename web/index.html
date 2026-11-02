@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ZCode Gateway</title>
-<link rel="stylesheet" href="/style.css?v=17">
+<link rel="stylesheet" href="/style.css?v=18">
 <script>
   // 夜间模式：在首屏渲染前决定主题，避免闪白
   try {
@@ -168,11 +168,12 @@
         </div>
         <div class="section-actions">
           <button class="btn" id="claim-all" title="对所有还没领到的账号跑一轮领取（会解验证码，耗时几分钟）">领取全部</button>
-          <button class="btn" id="import-local">导入本机账号</button>
-          <button class="btn primary" id="add-account">添加账号</button>
-      </div>
           <button class="btn" id="export-accounts">导出备份</button>
           <button class="btn" id="restore-accounts">导入备份</button>
+          <button class="btn" id="import-local">导入本机账号</button>
+          <button class="btn primary" id="add-account">添加账号</button>
+        </div>
+      </div>
       <details class="hint-box">
         <summary>怎么添加账号？两种方式怎么选</summary>
         <div class="hint-body">
@@ -182,7 +183,7 @@
         </div>
       </details>
       <div class="card">
-        <div class="table-wrap">
+        <div class="table-wrap accounts-scroll">
           <table class="table accounts-table" id="accounts-table">
         <thead><tr>
           <th class="w-priority sortable" data-sort="priority">优先级</th>
@@ -374,6 +375,11 @@
             </select>
             <small>每个账号同时在途的请求数。账号自己在「账号管理」里设了并发，就以账号的为准。</small>
           </label>
+          <label class="field">
+            <span>自动领取时段（北京时间）</span>
+            <input class="input" id="setting-claim-window" placeholder="19,20" autocomplete="off">
+            <small id="claim-window-hint">留空 = 每小时都尝试领取。</small>
+          </label>
           <div class="info-row"><span>API Base</span><code id="setting-base">-</code></div>
           <div class="info-row"><span>网关版本</span><code id="setting-version">-</code></div>
           <div class="info-row"><span>数据目录</span><code id="setting-datadir">-</code></div>
@@ -533,5 +539,5 @@
 </div>
 
 <div class="toast" id="toast"></div>
-<script src="/app.js?v=17"></script>
+<script src="/app.js?v=18"></script>
 </html>
