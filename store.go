@@ -214,6 +214,16 @@ func (s *Store) load() error {
 		// Older files predate the field; fingerprinting is the safe default.
 		file.Settings.Fingerprint = true
 	}
+	// ClaimWindow 的 "" 是合法值（不限时段），所以不能像上面那样按空值兜底，
+	// 得看 JSON 里到底有没有这个 key——没有才是老文件，补上默认的 19,20。
+	var keyProbe struct {
+		Settings map[string]json.RawMessage `json:"settings"`
+	}
+	if json.Unmarshal(data, &keyProbe) == nil {
+		if _, ok := keyProbe.Settings["claimWindow"]; !ok {
+			file.Settings.ClaimWindow = "19,20"
+		}
+	}
 	s.settings = file.Settings
 	s.accounts = nil
 	for _, sa := range file.Accounts {
