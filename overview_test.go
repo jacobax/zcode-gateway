@@ -113,3 +113,34 @@ func TestOverviewPlanAndQuotaStats(t *testing.T) {
 		t.Fatalf("missing buckets: %+v", accounts.Plans)
 	}
 }
+
+// 面板套餐名要跟着"哪份额度真能用"走：领到一份还没生效的高优先级套餐时，
+// 不能把原有套餐的额度记到它名下。
+func TestDisplayPlanPrefersPlanWithQuota(t *testing.T) {
+	plans := []QuotaPlan{
+		{PlanID: "plan-pending", Name: "GLOBAL BUILD", Priority: 111, Granted: 0, Remaining: 0},
+		{PlanID: "plan-active", Name: "Start Plan", Priority: 90, Granted: 8000000, Remaining: 8000000},
+	}
+	if got := displayPlan(plans); got == nil || got.PlanID != "plan-active" {
+		t.Fatalf("应选还有额度的那份，got %+v", got)
+	}
+	// 都有额度：挑剩余多的
+	both := []QuotaPlan{
+		{PlanID: "a", Priority: 111, Remaining: 100},
+		{PlanID: "b", Priority: 90, Remaining: 900},
+	}
+	if got := displayPlan(both); got == nil || got.PlanID != "b" {
+		t.Fatalf("应挑剩余额度最多的，got %+v", got)
+	}
+	// 都没额度：退回优先级最高的（这样面板还能显示"我领到了什么"）
+	none := []QuotaPlan{
+		{PlanID: "a", Priority: 90},
+		{PlanID: "b", Priority: 111},
+	}
+	if got := displayPlan(none); got == nil || got.PlanID != "b" {
+		t.Fatalf("都没额度时应退回优先级最高的，got %+v", got)
+	}
+	if got := displayPlan(nil); got != nil {
+		t.Fatalf("空列表应返回 nil，got %+v", got)
+	}
+}
