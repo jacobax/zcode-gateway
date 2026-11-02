@@ -89,11 +89,34 @@ func (s *Server) refreshQuota(ctx context.Context, acc *Account) error {
 			usageByModel[name] = *totals
 		}
 	}
-	balances, balanceErr := s.tryBalance(ctx, acc, currentPlan)
+	balanceResp, balanceErr := s.tryBalance(ctx, acc, currentPlan)
+	var balances []Balance
+	var balancePlans []PlanInfo
+	if balanceResp != nil {
+		balances = balanceResp.Data.Balances
+		balancePlans = balanceResp.Data.Plans
+	}
 
-	// billing/current 现在对所有账号返回 plans: []（2026-10 上游行为变化），
-	// 真实额度只在 billing/balance 里。没有 active plan 时按 balance 合成计划，
-	// 复用下面的聚合逻辑，避免面板额度恒为 0。
+	// billing/current 现在对所有账号返回 plans: []（2026-10 上游行为变化）。
+	// 真实套餐定义在 billing/balance 的 data.plans 里——那里同时有 name 和
+	// entitlements[].effective_at，比按 balance 反推更准。没有 plans 时才退
+	// 回从 balances 合成，避免面板额度恒为 0。
+	if len(activePlans) == 0 && balanceErr == nil && len(balancePlans) > 0 {
+		for i := range balancePlans {
+			if !strings.EqualFold(balancePlans[i].Status, "active") {
+				continue
+			}
+			activePlans = append(activePlans, &balancePlans[i])
+			if currentPlan == nil || balancePlans[i].Priority > currentPlan.Priority {
+				currentPlan = &balancePlans[i]
+			}
+		}
+		if currentPlan != nil {
+			quota.PlanName = currentPlan.Name
+			quota.PlanID = currentPlan.PlanID
+			quota.Status = "active"
+		}
+	}
 	if len(activePlans) == 0 && balanceErr == nil && len(balances) > 0 {
 		groups := map[string]*PlanInfo{}
 		var order []string
@@ -147,12 +170,37 @@ func (s *Server) refreshQuota(ctx context.Context, acc *Account) error {
 			byPlanName[b.UserPlanID+"|"+strings.ToLower(b.ShowName)] = b
 		}
 	}
+	// 已领到、但 effective_at 还在未来的额度：上游此时不建 balance 桶，
+	// 所以它不在 granted/remaining 里。单独列出来，别让它把「没额度」和
+	// 「还没到账」混成一种状态——前者该禁用，后者只能等。
+	now := time.Now().Unix()
+	for _, activePlan := range activePlans {
+		for _, ent := range activePlan.Entitlements {
+			if ent.EffectiveAt <= now || ent.EffectiveAt == 0 {
+				continue
+			}
+			if _, ok := byEntitlement[ent.EntitlementID]; ok {
+				continue
+			}
+			quota.Pending = append(quota.Pending, QuotaPending{
+				PlanID:      activePlan.PlanID,
+				PlanName:    activePlan.Name,
+				Model:       ent.ShowName,
+				Amount:      ent.GrantUnits,
+				EffectiveAt: ent.EffectiveAt,
+			})
+		}
+	}
 	switch {
 	case balanceErr != nil:
 		// 查不到余额：保持 local。这时候不知道有没有额度，谁都不能据此禁用账号。
 		quota.Source = "local"
 	case len(balances) > 0:
 		quota.Source = "api"
+	case len(quota.Pending) > 0:
+		// 有套餐、有授予额度，但一个 balance 桶都还没建：活动没到生效时间。
+		// 这和「上游确认没套餐」是两回事，不能触发自动禁用。
+		quota.Source = "api-pending"
 	default:
 		// 上游明确回了空列表：这个号当前没有任何余额/套餐。
 		// 和 local 区分开，自动启停才有可靠依据。
@@ -175,6 +223,12 @@ func (s *Server) refreshQuota(ctx context.Context, acc *Account) error {
 			b, ok := byEntitlement[ent.EntitlementID]
 			if !ok {
 				b, ok = byPlanName[activePlan.UserPlanID+"|"+strings.ToLower(ent.ShowName)]
+			}
+			// 没有 balance 桶、生效时间还在未来：这份额度现在用不了。
+			// 算进 granted 会让选号以为它有产能，发出去就是 1005。
+			// 它已经进了 quota.Pending，这里跳过。
+			if !ok && ent.EffectiveAt > now {
+				continue
 			}
 			used := int64(0)
 			if ok {
@@ -251,14 +305,18 @@ func (s *Server) refreshQuota(ctx context.Context, acc *Account) error {
 				a.LastError = "套餐已过期"
 			}
 		}
-		if quota.Remaining <= 0 && quota.Granted > 0 {
+		// 已领到但还没生效：现在发请求必吃 1005，先别让选号挑中它。
+		if quota.Granted == 0 && len(quota.Pending) > 0 {
+			a.ExhaustedUntil = time.Now().Add(10 * time.Minute).Unix()
+			a.LastError = "套餐待生效"
+		} else if quota.Remaining <= 0 && quota.Granted > 0 {
 			a.ExhaustedUntil = time.Now().Add(10 * time.Minute).Unix()
 			a.LastError = "额度耗尽"
 		} else {
 			if a.ExhaustedUntil < time.Now().Unix() {
 				a.ExhaustedUntil = 0
 			}
-			if a.LastError == "额度耗尽" {
+			if a.LastError == "额度耗尽" || a.LastError == "套餐待生效" {
 				a.LastError = ""
 				a.LastErrorAt = 0
 			}
@@ -274,6 +332,9 @@ func (s *Server) refreshQuota(ctx context.Context, acc *Account) error {
 			s.recordAccountEvent(updated, "额度恢复", fmt.Sprintf("剩余 %d / 共 %d", quota.Remaining, quota.Granted))
 		case updated.LastError == "套餐已过期":
 			s.recordAccountEvent(updated, "套餐过期", "上游返回非 active 状态")
+		case updated.LastError == "套餐待生效":
+			s.recordAccountEvent(updated, "额度待生效", fmt.Sprintf("%s，到账时间 %s",
+				pendingSummary(quota.Pending), pendingWhen(quota.Pending)))
 		}
 	}
 	// 套餐变化也记一条：换套餐、套餐到期、额度到账/清零。
@@ -300,7 +361,24 @@ func (s *Server) refreshQuota(ctx context.Context, acc *Account) error {
 	return nil
 }
 
-func (s *Server) tryBalance(ctx context.Context, acc *Account, plan *PlanInfo) ([]Balance, error) {
+func pendingSummary(items []QuotaPending) string {
+	parts := make([]string, 0, len(items))
+	for _, item := range items {
+		parts = append(parts, fmt.Sprintf("%s %d", item.Model, item.Amount))
+	}
+	return strings.Join(parts, "，")
+}
+
+func pendingWhen(items []QuotaPending) string {
+	for _, item := range items {
+		if item.EffectiveAt > 0 {
+			return time.Unix(item.EffectiveAt, 0).Format("2006-01-02 15:04")
+		}
+	}
+	return "未知"
+}
+
+func (s *Server) tryBalance(ctx context.Context, acc *Account, plan *PlanInfo) (*PlanResponse, error) {
 	base := "https://zcode.z.ai/api/v1/zcode-plan/billing/balance"
 	headers := s.profileHeaders(acc)
 	headers["Authorization"] = "Bearer " + acc.ZcodeJWT
@@ -323,18 +401,12 @@ func (s *Server) tryBalance(ctx context.Context, acc *Account, plan *PlanInfo) (
 	if err != nil {
 		return nil, err
 	}
-	var parsed struct {
-		Code int    `json:"code"`
-		Msg  string `json:"msg"`
-		Data struct {
-			Balances []Balance `json:"balances"`
-		} `json:"data"`
-	}
+	var parsed PlanResponse
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		return nil, err
 	}
 	if parsed.Code != 0 || resp.StatusCode != 200 {
 		return nil, fmt.Errorf("balance code=%d HTTP %d", parsed.Code, resp.StatusCode)
 	}
-	return parsed.Data.Balances, nil
+	return &parsed, nil
 }

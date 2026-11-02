@@ -52,6 +52,17 @@ type QuotaModel struct {
 	Source    string  `json:"source"`
 }
 
+// QuotaPending 是「已经领到、但还没到生效时间」的额度。
+// 上游在 effective_at 之前不建 balance 桶，所以它既不在 granted 里，
+// 也不能当成可用额度——单独记一份，面板上显示「待生效」。
+type QuotaPending struct {
+	PlanID      string `json:"planId,omitempty"`
+	PlanName    string `json:"planName,omitempty"`
+	Model       string `json:"model"`
+	Amount      int64  `json:"amount"`
+	EffectiveAt int64  `json:"effectiveAt"`
+}
+
 type QuotaPlan struct {
 	UserPlanID string       `json:"userPlanId,omitempty"`
 	PlanID     string       `json:"planId"`
@@ -68,19 +79,20 @@ type QuotaPlan struct {
 }
 
 type Quota struct {
-	Granted   int64        `json:"granted"`
-	Used      int64        `json:"used"`
-	Remaining int64        `json:"remaining"`
-	Percent   float64      `json:"percent"`
-	Source    string       `json:"source"`
-	Models    []QuotaModel `json:"models"`
-	Plans     []QuotaPlan  `json:"plans,omitempty"`
-	PlanName  string       `json:"planName"`
-	PlanID    string       `json:"planId"`
-	Status    string       `json:"status"`
-	EndsAt    int64        `json:"endsAt"`
-	UpdatedAt int64        `json:"updatedAt"`
-	Error     string       `json:"error,omitempty"`
+	Granted   int64          `json:"granted"`
+	Used      int64          `json:"used"`
+	Remaining int64          `json:"remaining"`
+	Percent   float64        `json:"percent"`
+	Source    string         `json:"source"`
+	Models    []QuotaModel   `json:"models"`
+	Plans     []QuotaPlan    `json:"plans,omitempty"`
+	PlanName  string         `json:"planName"`
+	PlanID    string         `json:"planId"`
+	Status    string         `json:"status"`
+	EndsAt    int64          `json:"endsAt"`
+	UpdatedAt int64          `json:"updatedAt"`
+	Pending   []QuotaPending `json:"pending,omitempty"`
+	Error     string         `json:"error,omitempty"`
 }
 
 type DeviceProfile struct {

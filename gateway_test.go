@@ -508,15 +508,19 @@ func mustUpstream(t *testing.T) *Upstream {
 }
 
 func TestActivityTokenSelection(t *testing.T) {
+	// 活动/套餐这一族接口只认 ZCode 自己的 JWT。OAuth accessToken 打
+	// marketing/touch 会回 200 但 deliveries:[]，看起来像"没有活动"，
+	// 实际是把活动页静默弄空了（2026-11 实测）。
 	acc := &Account{AccessToken: "access-token", ZcodeJWT: "zcode-jwt"}
-	if got := activityTokenForPath(acc, "/api/v1/marketing/touch"); got != "access-token" {
-		t.Fatalf("marketing should use access token, got %q", got)
-	}
-	if got := activityTokenForPath(acc, "/api/v1/zcode-plan/billing/preview"); got != "access-token" {
-		t.Fatalf("preview should use access token, got %q", got)
-	}
-	if got := activityTokenForPath(acc, "/api/v1/zcode-plan/billing/claim"); got != "zcode-jwt" {
-		t.Fatalf("claim should use zcode JWT, got %q", got)
+	for _, path := range []string{
+		"/api/v1/marketing/touch",
+		"/api/v1/zcode-plan/billing/preview",
+		"/api/v1/zcode-plan/billing/claim",
+		"/api/v1/zcode-plan/billing/current",
+	} {
+		if got := activityTokenForPath(acc, path); got != "zcode-jwt" {
+			t.Fatalf("%s should use zcode JWT, got %q", path, got)
+		}
 	}
 	fallback := &Account{AccessToken: "access-token"}
 	if got := activityTokenForPath(fallback, "/api/v1/zcode-plan/billing/claim"); got != "access-token" {

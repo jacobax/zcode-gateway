@@ -637,6 +637,9 @@ func (s *Store) Summaries() []*AccountSummary {
 			status = "已禁用"
 		} else if acc.Quota.Granted > 0 && acc.Quota.Remaining <= 0 {
 			status = "额度耗尽"
+		} else if acc.Quota.Granted == 0 && len(acc.Quota.Pending) > 0 {
+			// 已领到套餐，但 effective_at 还没到，上游还没建 balance 桶。
+			status = "待生效"
 		} else if acc.ExhaustedUntil > now.Unix() {
 			status = "冷却中"
 		}

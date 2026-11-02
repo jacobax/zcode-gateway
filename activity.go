@@ -160,21 +160,20 @@ func (s *Server) reportActivation(ctx context.Context, acc *Account) []string {
 	return warnings
 }
 
+// activityToken 取打 zcode.z.ai 活动接口的凭据。
+//
+// 只有 ZCode 自己的 JWT 认活动/套餐这一族接口；OAuth 的 accessToken 是
+// 拿去打上游模型平台（api.z.ai / open.bigmodel.cn）的，对 zcode.z.ai 返回
+// 401 或"空结果"——marketing/touch 会回 200 但 deliveries:[]，看起来像
+// "当前没有活动"，实际上是把整个活动页静默弄空了。
 func activityToken(acc *Account) string {
-	if token := strings.TrimSpace(acc.AccessToken); token != "" {
+	if token := strings.TrimSpace(acc.ZcodeJWT); token != "" {
 		return token
 	}
-	return strings.TrimSpace(acc.ZcodeJWT)
+	return strings.TrimSpace(acc.AccessToken)
 }
 
 func activityTokenForPath(acc *Account, path string) string {
-	// marketing/preview accept the OAuth access token; the billing claim
-	// endpoint authenticates with the account's ZCode JWT instead.
-	if strings.HasSuffix(path, "/claim") || strings.HasSuffix(path, "/current") {
-		if token := strings.TrimSpace(acc.ZcodeJWT); token != "" {
-			return token
-		}
-	}
 	return activityToken(acc)
 }
 
@@ -276,6 +275,7 @@ func (s *Server) detectActivities(ctx context.Context, acc *Account) (*ActivityS
 	warnings := s.reportActivation(ctx, acc)
 	serverTime := time.Now().Unix()
 	var marketingOK, previewOK bool
+	bannerClaimable := map[string]bool{}
 
 	marketing, _, marketingErr := s.zcodeAPICall(ctx, acc, "GET", "/api/v1/marketing/touch", url.Values{"seq": {"0"}}, nil, nil)
 	if marketingErr != nil {
@@ -289,6 +289,10 @@ func (s *Server) detectActivities(ctx context.Context, acc *Account) (*ActivityS
 			serverTime = int64(v)
 		}
 		collectPlanMaps(data, planMaps)
+		// 横幅上带 claim_zcode_plan 按钮 = 这个套餐现在能领。
+		// preview 从 2026-11 起对多数号返回空 data，claimable 只能靠这里兜底，
+		// 否则面板上所有活动都会显示「暂不可领取」、按钮全灰。
+		collectClaimableIDs(data, bannerClaimable)
 		deliveries, _ := data["deliveries"].([]any)
 		for _, item := range deliveries {
 			delivery := activityMap(item)
@@ -332,12 +336,11 @@ func (s *Server) detectActivities(ctx context.Context, acc *Account) (*ActivityS
 		return nil, fmt.Errorf("活动接口不可用")
 	}
 
-	activePlans, currentErr := s.currentPlans(ctx, acc)
-	if currentErr != nil {
-		warnings = append(warnings, "已领取状态: "+currentErr.Error())
-		activePlans = nil
-	}
-
+	// billing/current 从 2026-11 起对多数号返回空 data（偶尔 429 空 body），
+	// 只当"补充的已领取状态"用，拿不到就算了——真正的已领取信息在
+	// billing/balance 的 plans 里，下面会兜底。别把它塞进 warnings，
+	// 否则面板上会挂一条跟用户无关的报错。
+	activePlans, _ := s.currentPlans(ctx, acc)
 	plans := make([]ActivityPlan, 0, len(planMaps))
 	for _, raw := range planMaps {
 		plan := activityPlanFromMap(raw)
@@ -350,19 +353,56 @@ func (s *Server) detectActivities(ctx context.Context, acc *Account) (*ActivityS
 		}
 		plans = append(plans, plan)
 	}
-	// Plans returned by preview are claimable, even if no banner plan metadata
-	// carried a start/end window.
+	// 已领取的号，横幅会消失（marketing 回 deliveries:[]），planMaps 也就空了。
+	// 但 billing/balance 里还留着这份套餐（含 effective_at），拿它补出来，
+	// 否则用户领完再打开面板只看到「没有活动」，以为领取失败。
+	known := map[string]bool{}
+	for _, plan := range plans {
+		known[plan.PlanID] = true
+	}
+	if resp, balanceErr := s.tryBalance(ctx, acc, nil); balanceErr == nil && resp != nil {
+		for _, p := range resp.Data.Plans {
+			if p.PlanID == "" || known[p.PlanID] {
+				continue
+			}
+			plan := ActivityPlan{
+				PlanID:      p.PlanID,
+				Name:        p.Name,
+				Priority:    p.Priority,
+				StartsAt:    p.StartsAt,
+				EndsAt:      p.EndsAt,
+				Claimed:     true,
+				CurrentStatus: p.Status,
+			}
+			for _, ent := range p.Entitlements {
+				plan.Entitlements = append(plan.Entitlements, ActivityEntitlement{
+					EntitlementID: ent.EntitlementID,
+					Model:         ent.ShowName,
+					Amount:        ent.GrantUnits,
+					Period:        ent.Period,
+					EffectiveAt:   ent.EffectiveAt,
+					Priority:      ent.Priority,
+				})
+				if plan.EffectiveAt == 0 && ent.EffectiveAt > 0 {
+					plan.EffectiveAt = ent.EffectiveAt
+				}
+			}
+			plans = append(plans, plan)
+			known[plan.PlanID] = true
+		}
+	}
+	// claimable：preview 明确列出来的，或者横幅上有 claim 按钮的。
+	// preview 从 2026-11 起对多数号返回空 data，只靠它会全部判成不可领。
 	if previewOK {
 		data := activityMap(preview["data"])
-		claimable := map[string]bool{}
 		for _, item := range activitySlice(data, "plans") {
 			if id := activityString(activityMap(item), "plan_id"); id != "" {
-				claimable[id] = true
+				bannerClaimable[id] = true
 			}
 		}
-		for i := range plans {
-			plans[i].Claimable = claimable[plans[i].PlanID]
-		}
+	}
+	for i := range plans {
+		plans[i].Claimable = bannerClaimable[plans[i].PlanID] && !plans[i].Claimed
 	}
 	sort.SliceStable(plans, func(i, j int) bool {
 		if plans[i].Priority != plans[j].Priority {
@@ -625,6 +665,31 @@ func collectPlanIDs(value any) []string {
 	}
 	sort.Strings(ids)
 	return ids
+}
+
+// collectClaimableIDs 从 marketing 的横幅里找 claim_zcode_plan 按钮，
+// 把它指向的 plan_id 收进来。这是「现在能领」的最可靠信号：
+// 上游 preview 从 2026-11 起对多数号返回空 data，只靠 preview 判断
+// 会让面板上所有活动都显示「暂不可领取」。
+func collectClaimableIDs(value any, out map[string]bool) {
+	switch v := value.(type) {
+	case map[string]any:
+		if action := activityMap(v["action"]); action != nil &&
+			activityString(action, "type") == "claim_zcode_plan" {
+			if args := activityMap(action["args"]); args != nil {
+				if id := activityString(args, "plan_id"); id != "" {
+					out[id] = true
+				}
+			}
+		}
+		for _, child := range v {
+			collectClaimableIDs(child, out)
+		}
+	case []any:
+		for _, child := range v {
+			collectClaimableIDs(child, out)
+		}
+	}
 }
 
 func activityPlanFromMap(m map[string]any) ActivityPlan {

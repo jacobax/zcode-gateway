@@ -226,6 +226,7 @@ function statusTag(log) {
 function statusClass(status) {
   if (status === '可用') return 'ok';
   if (status === '额度耗尽' || status === '异常') return 'bad';
+  if (status === '待生效') return 'info';
   if (status === '已禁用') return 'warn';
   return 'info';
 }
@@ -330,6 +331,15 @@ function accountRow(account, index) {
       <div class="bar ${barClass(percent)}"><span style="width:${percent.toFixed(1)}%"></span></div>
     </div>`;
   };
+  const quotaPending = account.quota && Array.isArray(account.quota.pending) ? account.quota.pending : [];
+  const pendingLines = quotaPending
+    .map((item) => {
+      const when = item.effectiveAt ? timeText(item.effectiveAt) : '';
+      return `<div class="quota-pending" title="已领取，等上游到账">
+        <span>待生效 · ${esc(item.model || item.planName || '额度')}</span>
+        <span>${units(item.amount)}${when ? ` · ${esc(when)} 到账` : ''}</span>
+      </div>`;
+    }).join('');
   const quotaHtmlLines = quotaPlans.length
     ? quotaPlans.map((plan) => `<div class="quota-plan">
         <div class="quota-plan-head"><span>${esc(plan.name || plan.planId)}</span><span class="muted-cell">P${n(plan.priority)}</span></div>
@@ -337,7 +347,7 @@ function accountRow(account, index) {
       </div>`).join('')
     : quotaModels.length
       ? quotaModels.map(quotaLine).join('')
-      : '<span class="muted-cell">等待额度刷新</span>';
+      : (pendingLines ? '' : '<span class="muted-cell">等待额度刷新</span>');
   const nowSec = Math.floor(Date.now() / 1000);
   const modelStateLines = (account.modelStates || [])
     .filter((state) => state.disabled || Number(state.cooldownUntil) > nowSec)
@@ -367,7 +377,7 @@ function accountRow(account, index) {
       ${cooldownText(account) ? `<div class="muted-cell">${esc(cooldownText(account))}</div>` : ''}
     </td>
     <td style="min-width:250px">
-      <div class="quota-models">${quotaHtmlLines}</div>
+      <div class="quota-models">${quotaHtmlLines}${pendingLines}</div>
       ${modelStateLines}
     </td>
     <td style="min-width:260px">

@@ -227,9 +227,24 @@ def manage_pass(accounts):
         remaining = q.get("remaining", 0) or 0
         granted = q.get("granted", 0) or 0
         # api = 有余额；api-empty = 上游明确回了空列表（确实没套餐）；
+        # api-pending = 已领到套餐但没到生效时间（effective_at 在未来）；
         # local = 没查成功，这时候不能据此禁用账号。
         source = q.get("source") or ""
+        updated = q.get("updatedAt", 0) or 0
         fresh = (now - updated) < 900 and source in ("api", "api-empty")
+
+        # 已领到、还没到生效时间：额度会在 effective_at 之后才到账。
+        # 这不是「没产能」，既不该禁用，也还不能启用——记进 pending_activation
+        # 等后续轮次额度真到账（remaining>0）再启用。
+        pending_items = q.get("pending") or []
+        if pending_items and remaining == 0:
+            if aid not in pending:
+                pending.append(aid)
+                when = pending_items[0].get("effectiveAt") or 0
+                when_text = time.strftime("%F %H:%M", time.localtime(when)) if when else "未知"
+                say(f"  {label}: 已领到但还没生效（{len(pending_items)} 项，{when_text} 到账），等下一轮")
+            streaks.pop(aid, None)
+            continue
 
         if not a.get("enabled") and remaining > 0:
             ours = aid in st["disabled_by_us"]
