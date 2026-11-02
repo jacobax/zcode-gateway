@@ -55,6 +55,7 @@ func main() {
 	mux.HandleFunc("/api/admin/password", server.requireAdmin(server.handleChangePassword))
 	mux.HandleFunc("/api/settings/token", server.requireAdmin(server.handleRevealToken))
 	mux.HandleFunc("/api/update", server.requireAdmin(server.handleUpdate))
+	mux.HandleFunc("/api/claim", server.requireAdmin(server.handleClaim))
 	mux.HandleFunc("/api/proxies/settings", server.requireAdmin(server.handleProxySettings))
 	mux.HandleFunc("/api/proxies", server.requireAdmin(server.handleProxies))
 	mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)

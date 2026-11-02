@@ -36,6 +36,7 @@ type Server struct {
 	adminMu        sync.RWMutex
 	login          *loginThrottle
 	updates        *updateChecker
+	claim          *claimJob
 }
 
 func NewServer(store *Store, upstream *Upstream, baseURL string) *Server {
@@ -49,6 +50,7 @@ func NewServer(store *Store, upstream *Upstream, baseURL string) *Server {
 		version:  appVersion,
 		login:    newLoginThrottle(),
 		updates:  newUpdateChecker(),
+		claim:    &claimJob{},
 	}
 	server.initAdminPassword()
 	return server
@@ -108,10 +110,12 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	// 套餐分布 + 额度合计：只统计启用中的账号，禁用号不占产能也不该计入剩余额度。
+	// 套餐分布：一个号可能同时挂着好几个套餐（老套餐还没过期、新活动已经领到），
+	// 所以按 Quota.Plans 逐份统计，不能只认 Quota.PlanName——那是「面板上显示
+	// 哪个」，选出来只有一份，其余套餐的额度会凭空消失。
 	plans := map[string]*PlanStat{}
-	for _, acc := range accounts {
-		name := strings.TrimSpace(acc.Quota.PlanName)
+	planStat := func(name string) *PlanStat {
+		name = strings.TrimSpace(name)
 		if name == "" {
 			name = "无套餐"
 		}
@@ -120,13 +124,32 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 			stat = &PlanStat{Name: name}
 			plans[name] = stat
 		}
-		stat.Count++
+		return stat
+	}
+	for _, acc := range accounts {
+		if len(acc.Quota.Plans) == 0 {
+			// 没有套餐明细（local 额度源、或上游没返回 plans）：退回单份口径
+			stat := planStat(acc.Quota.PlanName)
+			stat.Count++
+			if acc.Enabled {
+				stat.Enabled++
+				stat.Granted += acc.Quota.Granted
+				stat.Remaining += acc.Quota.Remaining
+			}
+		} else {
+			for _, plan := range acc.Quota.Plans {
+				stat := planStat(plan.Name)
+				stat.Count++
+				if acc.Enabled {
+					stat.Enabled++
+					stat.Granted += plan.Granted
+					stat.Remaining += plan.Remaining
+				}
+			}
+		}
 		if !acc.Enabled {
 			continue
 		}
-		stat.Enabled++
-		stat.Granted += acc.Quota.Granted
-		stat.Remaining += acc.Quota.Remaining
 		overview.Accounts.Quota.Granted += acc.Quota.Granted
 		overview.Accounts.Quota.Remaining += acc.Quota.Remaining
 		if acc.Quota.Granted > 0 {
@@ -443,7 +466,8 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			"passwordSource": s.passwordSource(),
 			"proxyTokenMask": maskToken(real),
 			"proxyTokenSet":   real != "",
-			"egressAvailable": s.upstream.HasEgress(),
+			"egressAvailable":  s.upstream.HasEgress(),
+			"claimSolverReady": captchaSolverDir() != "",
 			"egressProxy":     proxyDisplay(s.upstream.EgressProxyURL()),
 			"server": ServerInfo{
 				Version: s.version, BuildVersion: buildVersion, BaseURL: s.baseURL, Fingerprint: settings.Fingerprint,

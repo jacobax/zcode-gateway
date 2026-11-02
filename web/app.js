@@ -405,6 +405,7 @@ function accountRow(account, index) {
       <button class="btn" data-action="down" data-id="${esc(account.id)}" ${index === state.accounts.length - 1 ? 'disabled' : ''}>↓</button>
       <button class="btn" data-action="fingerprint" data-id="${esc(account.id)}" title="重新生成设备指纹（device_mid 会变）">新指纹</button>
       <button class="btn" data-action="activities" data-id="${esc(account.id)}">活动</button>
+      <button class="btn" data-action="claim" data-id="${esc(account.id)}" title="领取这个账号当前可领的套餐">领取</button>
       <button class="btn" data-action="refresh" data-id="${esc(account.id)}">刷新</button>
       ${account.status === '冷却中' || (account.modelStates || []).some((state) => state.disabled || Number(state.cooldownUntil) > nowSec) ? `<button class="btn" data-action="clear-cooldown" data-id="${esc(account.id)}">清除冷却</button>` : ''}
       <button class="btn ${account.enabled ? 'danger' : ''}" data-action="toggle" data-id="${esc(account.id)}">${account.enabled ? '禁用' : '启用'}</button>
@@ -455,6 +456,57 @@ async function refreshAccount(id) {
   } catch (error) {
     toast(error.message, true);
   }
+
+// ---------- 手动领取 ----------
+// 网关侧是后台任务：POST /api/claim 立刻返回，靠 GET /api/claim 轮询进度。
+// 一次全号领取要跑几十分钟（每个号都要起一次 Chromium 解验证码），
+// 不能做成一个长请求。
+let claimPoll = null;
+
+function renderClaimProgress(job) {
+  const btn = $('claim-all');
+  if (!btn) return;
+  if (job && job.running) {
+    btn.disabled = true;
+    btn.textContent = `领取中 ${job.done}/${job.total} · 成功 ${job.claimed}`;
+  } else {
+    btn.disabled = false;
+    btn.textContent = '领取全部';
+  }
+}
+
+async function pollClaim() {
+  try {
+    const job = await api('/api/claim');
+    renderClaimProgress(job);
+    if (job.running) return;
+    clearInterval(claimPoll);
+    claimPoll = null;
+    const results = job.results || [];
+    const fails = results.filter((r) => !r.ok && !r.skipped);
+    const skips = results.filter((r) => r.skipped);
+    toast(`领取结束：成功 ${job.claimed}，失败 ${fails.length}，跳过 ${skips.length}`);
+    await loadAccounts();
+    await loadOverview();
+  } catch (error) {
+    clearInterval(claimPoll);
+    claimPoll = null;
+    renderClaimProgress(null);
+    toast(error.message, true);
+  }
+}
+
+async function startClaim(accountIds) {
+  try {
+    const body = accountIds && accountIds.length ? { accountIds } : {};
+    const res = await api('/api/claim', { method: 'POST', body: JSON.stringify(body) });
+    renderClaimProgress(res.job || { running: true, done: 0, total: 0, claimed: 0 });
+    if (!claimPoll) claimPoll = setInterval(pollClaim, 3000);
+    toast('已开始领取，进度看「领取全部」按钮');
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
 }
 
 function activityPeriod(period) {
@@ -1239,7 +1291,7 @@ document.addEventListener('click', (event) => {
     if (action.dataset.action === 'toggle') toggleAccount(id);
     if (action.dataset.action === 'refresh') refreshAccount(id);
     if (action.dataset.action === 'activities') detectActivities(id);
-    if (action.dataset.action === 'fingerprint') rotateFingerprint(id);
+    if (action.dataset.action === 'claim') startClaim([id]);
     if (action.dataset.action === 'clear-cooldown') clearCooldown(id);
     if (action.dataset.action === 'delete') deleteAccount(id);
   }
@@ -1248,6 +1300,7 @@ document.addEventListener('click', (event) => {
 });
 
 $('refresh-all').addEventListener('click', async () => {
+$('claim-all').addEventListener('click', () => startClaim([]));
   await Promise.all([loadOverview(), loadAccounts(), loadLogs()]);
   toast('已刷新');
 });

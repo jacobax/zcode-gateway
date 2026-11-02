@@ -44,6 +44,7 @@ claimEgress 要设成 proxy/proxy_fallback，别用 direct_fallback——后者�
   ZC_ENABLE_AFTER_CLAIM  1 = 领到套餐后自动启用该账号（默认 1）
   ZC_DISABLED_MARKER    额外认这个 lastError 标记的禁用号（默认「迁移时停用」）
 """
+import datetime
 import json
 import os
 import subprocess
@@ -71,6 +72,11 @@ RELAY_ROTATE_URL = os.environ.get("ZC_RELAY_ROTATE_URL", "")
 RELAY_PROXY_URL = os.environ.get("ZC_RELAY_PROXY_URL", "")
 if not RELAY_PROXY_URL and RELAY_ROTATE_URL:
     RELAY_PROXY_URL = RELAY_ROTATE_URL.rsplit("/rotate", 1)[0]
+# 只在活动开放的那几个小时里真去领取。上游通常北京时间 19:00 开闸，19:xx 和
+# 20:xx 两轮就够把全号过一遍 + 重试；其它时段跑只会白解验证码。
+# 留空或 "*" = 不限时段。额度启停（manage_pass）不受影响，照常每小时跑。
+CLAIM_WINDOW = os.environ.get("ZC_CLAIM_WINDOW", "19,20")
+CLAIM_TZ = os.environ.get("ZC_CLAIM_TZ", "Asia/Shanghai")
 # 失败缓存有效期：命中 1001–1005 / 3012 后多久内不再重试（避免每小时重复解验证码）
 RETRY_SKIP_HOURS = float(os.environ.get("ZC_RETRY_SKIP_HOURS", "6"))
 AUTO_MANAGE = os.environ.get("ZC_AUTO_MANAGE", os.environ.get("ZC_AUTO_ENABLE", "1")) == "1"
@@ -329,6 +335,40 @@ def manage_pass(accounts):
     return enabled, disabled
 
 
+def in_claim_window():
+    """现在是不是活动开放时段。True 才真去解验证码领取。
+
+    CLAIM_WINDOW 支持 "19,20"（两个整点）或 "19-21"（区间）或 "" / "*"（不限）。
+    按 CLAIM_TZ 判定，默认北京时间。
+    """
+    spec = (CLAIM_WINDOW or "").strip()
+    if not spec or spec == "*":
+        return True
+    try:
+        from zoneinfo import ZoneInfo
+        local = datetime.datetime.now(ZoneInfo(CLAIM_TZ))
+    except Exception:
+        local = datetime.datetime.now()
+    hours = set()
+    for part in spec.replace(" ", "").split(","):
+        if not part:
+            continue
+        try:
+            if "-" in part:
+                lo, hi = part.split("-", 1)
+                for h in range(int(lo), int(hi) + 1):
+                    hours.add(h % 24)
+            else:
+                hours.add(int(part) % 24)
+        except ValueError:
+            continue
+    if not hours:
+        return True
+    return local.hour in hours
+
+    return enabled, disabled
+
+
 def main():
     trim_log()
     if not PASSWORD:
@@ -350,6 +390,13 @@ def main():
     woke, slept = manage_pass(accounts)
     if woke or slept:
         say(f"  本轮额度启停：启用 {woke} 个、禁用 {slept} 个")
+
+    # 领取只在活动开放时段做。额度启停（上面那步）照常每小时跑——否则
+    # 23:00 额度到账、号要等到第二天 19:00 才被启用，白等 20 小时。
+    if not DRY and not in_claim_window():
+        say(f"  当前不在领取时段（ZC_CLAIM_WINDOW={CLAIM_WINDOW or '不限'}，"
+            f"按 {CLAIM_TZ}），本轮只做额度启停；需要立刻领取请用面板「领取」按钮")
+        return 0
 
     attempts = load_attempts()
     now = time.time()

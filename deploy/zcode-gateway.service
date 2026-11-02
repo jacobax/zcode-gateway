@@ -13,6 +13,12 @@ Environment=ZCODE_GATEWAY_ADDR=127.0.0.1:3000
 Environment=ZCODE_GATEWAY_DATA=/opt/zcode-gateway/data
 Environment=ZCODE_ADMIN_PASSWORD=CHANGE_ME
 Environment=ZCODE_GATEWAY_LOG=1
+# 面板「领取全部 / 领取」按钮：解验证码要起 Chromium，这里指向 solver 目录。
+# 不配的话按钮仍会出现，但会明确报「未配置验证码求解器」。
+# Environment=ZCODE_CAPTCHA_SOLVER_DIR=/opt/zcode-claimer/solver
+# 领取出口（住宅代理中继）。配了才会「解验证码和领取走同一个 IP」。
+# Environment=ZCODE_PROXY_URL_CLAIM=http://127.0.0.1:3129
+# Environment=ZCODE_CLAIM_GAP_SEC=15
 ExecStart=/opt/zcode-gateway/zcode-gateway
 Restart=always
 RestartSec=5

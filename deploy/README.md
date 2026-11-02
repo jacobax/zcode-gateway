@@ -86,6 +86,20 @@ systemctl daemon-reload && systemctl enable --now zcode-claimer.timer
 | `ZCODE_ADMIN_PASSWORD` | 自定 | 面板登录密码的**初始值**；在面板里改过密码后以面板为准（带 `adminPasswordManual` 标记），不设则首次启动随机生成并打到日志 |
 面板密码、全局默认并发都在「设置」页里改，不需要动单元文件。
 
+### 面板「领取」按钮相关的三个变量
+
+面板上的「领取全部」和账号行里的「领取」会真的去解验证码、提交领取。它们依赖：
+
+| 变量 | 说明 |
+|---|---|
+| `ZCODE_CAPTCHA_SOLVER_DIR` | `solver_pw.js` 所在目录（见 `contrib/claimer/solver`）。不配则按钮报「未配置验证码求解器」 |
+| `ZCODE_PROXY_URL_CLAIM` | 领取出口（通常是本地中继 `http://127.0.0.1:3129`）。**解验证码的 Chromium 也会走它**——阿里云的 `captchaVerifyParam` 绑 IP，两边不同出口就是 3012 |
+| `ZCODE_CLAIM_GAP_SEC` | 两次领取之间的间隔，默认 15 秒 |
+
+`ZCODE_CLAIM_3012_RETRIES`（默认 2）控制 3012 后换出口重试几次。
+
+不配 `ZCODE_CAPTCHA_SOLVER_DIR` 时，网关的其它功能完全不受影响——只是手动领取按钮不可用。
+
 ## 客户端接入
 
 网关同时提供两个协议入口，任选其一：
