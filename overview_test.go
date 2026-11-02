@@ -144,3 +144,55 @@ func TestDisplayPlanPrefersPlanWithQuota(t *testing.T) {
 		t.Fatalf("空列表应返回 nil，got %+v", got)
 	}
 }
+
+// 一个号同时挂多个套餐时，每份都要单独计入套餐分布，不能只算 Quota.PlanName。
+// 线上实测：22 个号同时有 0817（8M）和 1102（3 亿），旧口径只报 1102，
+// 0817 那 1.76 亿直接不见了。
+func TestOverviewCountsEveryPlanOfAnAccount(t *testing.T) {
+	store := newTestStore(t, "overview-multi")
+	acc := &Account{
+		ID: "multi", Label: "multi", Provider: "zai", Mode: "start-plan",
+		User: UserInfo{ID: "u-multi"}, Enabled: true, CreatedAt: 1,
+		Models: map[string]*UsageTotals{},
+		Quota: Quota{
+			Granted: 308000000, Remaining: 308000000, PlanName: "GLOBAL BUILD",
+			Plans: []QuotaPlan{
+				{PlanID: "p-big", Name: "GLOBAL BUILD", Priority: 111,
+					Granted: 300000000, Remaining: 300000000},
+				{PlanID: "p-small", Name: "Start Plan", Priority: 90,
+					Granted: 8000000, Remaining: 8000000},
+			},
+		},
+	}
+	if err := store.AddAccount(acc); err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(store, mustUpstream(t), "http://test")
+	rec := httptest.NewRecorder()
+	server.handleOverview(rec, httptest.NewRequest(http.MethodGet, "/api/overview", nil))
+	if rec.Code != 200 {
+		t.Fatalf("unexpected status %d: %s", rec.Code, rec.Body.String())
+	}
+	var ov Overview
+	if err := json.Unmarshal(rec.Body.Bytes(), &ov); err != nil {
+		t.Fatal(err)
+	}
+	buckets := map[string]PlanStat{}
+	for _, p := range ov.Accounts.Plans {
+		buckets[p.Name] = p
+	}
+	if len(buckets) != 2 {
+		t.Fatalf("应拆成两个套餐桶，got %+v", ov.Accounts.Plans)
+	}
+	big, small := buckets["GLOBAL BUILD"], buckets["Start Plan"]
+	if big.Count != 1 || big.Granted != 300000000 || big.Remaining != 300000000 {
+		t.Fatalf("GLOBAL BUILD 桶不对: %+v", big)
+	}
+	if small.Count != 1 || small.Granted != 8000000 || small.Remaining != 8000000 {
+		t.Fatalf("Start Plan 桶不对: %+v", small)
+	}
+	// 账号级合计仍然按账号算，不能被拆成两份重复累加
+	if ov.Accounts.Quota.Granted != 308000000 {
+		t.Fatalf("账号级额度合计不该重复累加，got %d", ov.Accounts.Quota.Granted)
+	}
+}
