@@ -191,6 +191,9 @@ type Settings struct {
 	EgressMode string `json:"egressMode,omitempty"`
 	// EgressRotate 为 true 时，兜底重试前先让中继换一个出口 IP。
 	EgressRotate bool `json:"egressRotate,omitempty"`
+	// ClaimEgress 决定领取/活动调用走哪条出口：""/proxy（默认，走中继）或 direct（直连）。
+	// 中继代理池全挂时切 direct，避免领取链路整条瘫掉。
+	ClaimEgress string `json:"claimEgress,omitempty"`
 }
 
 type Overview struct {

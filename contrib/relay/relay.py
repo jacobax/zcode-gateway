@@ -260,15 +260,94 @@ async def open_tunnel(entry, target_host, target_port):
         return None, None, f"CONNECT 失败（{e.__class__.__name__}）"
 
 
-async def check_entry(entry):
+# 体检路径：能拿到 2xx/3xx/4xx 就说明代理真的把流量转出去了。
+CHECK_PATH = os.environ.get("RELAY_CHECK_PATH", "/api/v1/client/configs")
+
+
+def _probe_blocking(host, port, use_tls, target_host, target_port, path, timeout):
+    """完整走一遍：连代理 →（https 代理先 TLS）→ CONNECT → 目标 TLS → 发一个 GET。
+
+    只做 TCP 隧道连通是不够的：能建隧道但转发真实 TLS 就断的"假健康"代理
+    在旧体检里全是绿的，实际请求却一个都出不去。
+    """
+    import socket
+
     t0 = time.time()
+    sock = None
+    try:
+        sock = socket.create_connection((host, port), timeout=timeout)
+        sock.settimeout(timeout)
+        if use_tls:
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            sock = ctx.wrap_socket(sock, server_hostname=host)
+
+        sock.sendall(
+            f"CONNECT {target_host}:{target_port} HTTP/1.1\r\n"
+            f"Host: {target_host}:{target_port}\r\n\r\n".encode()
+        )
+        head = b""
+        while b"\r\n\r\n" not in head:
+            chunk = sock.recv(1024)
+            if not chunk:
+                return False, int((time.time() - t0) * 1000), "CONNECT 无响应"
+            head += chunk
+            if len(head) > 8192:
+                return False, int((time.time() - t0) * 1000), "CONNECT 响应异常"
+        status_line = head.split(b"\r\n", 1)[0].decode("latin1", "replace")
+        if " 200" not in status_line:
+            code = status_line.split(" ")[1] if len(status_line.split(" ")) > 1 else "?"
+            return False, int((time.time() - t0) * 1000), f"CONNECT 被拒（{code}）"
+
+        tctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        tctx.check_hostname = False
+        tctx.verify_mode = ssl.CERT_NONE
+        tsock = tctx.wrap_socket(sock, server_hostname=target_host)
+        tsock.sendall(
+            f"GET {path} HTTP/1.1\r\nHost: {target_host}\r\n"
+            f"User-Agent: ZCode/{os.environ.get('ZCODE_APP_VERSION', '3.16.3')}\r\n"
+            f"Accept: application/json\r\nConnection: close\r\n\r\n".encode()
+        )
+        resp = tsock.recv(256)
+        if not resp:
+            return False, int((time.time() - t0) * 1000), "目标无响应"
+        line = resp.split(b"\r\n", 1)[0].decode("latin1", "replace")
+        parts = line.split(" ")
+        if len(parts) < 2 or not parts[1].isdigit():
+            return False, int((time.time() - t0) * 1000), f"响应异常（{line[:32]}）"
+        code = int(parts[1])
+        if code >= 500:
+            return False, int((time.time() - t0) * 1000), f"目标 HTTP {code}"
+        return True, int((time.time() - t0) * 1000), ""
+    except ssl.SSLError as e:
+        return False, int((time.time() - t0) * 1000), f"TLS 失败（{getattr(e, 'reason', '') or e.__class__.__name__}）"
+    except socket.timeout:
+        return False, int((time.time() - t0) * 1000), "超时"
+    except OSError as e:
+        return False, int((time.time() - t0) * 1000), f"连接失败（{e.strerror or e.__class__.__name__}）"
+    except Exception as e:  # noqa: BLE001 - 体检不能让单条代理拖垮整轮
+        return False, int((time.time() - t0) * 1000), f"失败（{e.__class__.__name__}）"
+    finally:
+        try:
+            if sock is not None:
+                sock.close()
+        except Exception:
+            pass
+
+
+async def check_entry(entry):
     th, _, tp = CHECK_TARGET.rpartition(":")
-    r, w, reason = await open_tunnel(entry, th, int(tp))
-    ms = int((time.time() - t0) * 1000)
-    if r:
-        w.close()
-        return True, ms, ""
-    return False, ms, reason
+    return await asyncio.to_thread(
+        _probe_blocking,
+        entry["host"],
+        entry["port"],
+        entry["scheme"] == "https",
+        th,
+        int(tp),
+        CHECK_PATH,
+        CONNECT_TIMEOUT,
+    )
 
 
 async def check_many(entries):

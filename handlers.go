@@ -429,6 +429,7 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"items": s.store.Logs(limit, status, accountID)})
 }
 
+
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -461,6 +462,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			AutoUpdate         *bool   `json:"autoUpdate"`
 			EgressMode         *string `json:"egressMode"`
 			EgressRotate       *bool   `json:"egressRotate"`
+			ClaimEgress        *string `json:"claimEgress"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			writeError(w, 400, "invalid json")
@@ -506,6 +508,12 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			}
 			if body.EgressRotate != nil {
 				st.EgressRotate = *body.EgressRotate
+			}
+			if body.ClaimEgress != nil {
+				switch *body.ClaimEgress {
+				case "direct", "proxy":
+					st.ClaimEgress = *body.ClaimEgress
+				}
 			}
 		})
 		settings := s.store.Settings()

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ZCode Gateway</title>
-<link rel="stylesheet" href="/style.css?v=13">
+<link rel="stylesheet" href="/style.css?v=14">
 <script>
   // 夜间模式：在首屏渲染前决定主题，避免闪白
   try {
@@ -308,6 +308,7 @@
             <input type="checkbox" id="setting-autoupdate" class="switch">
           </label>
           <small id="update-hint">「检查更新」会问 GitHub 最新 release，结果缓存 10 分钟。</small>
+        </div>
         <div class="card">
           <div class="card-head">
             <div><div class="card-kicker">出口</div><h2>网关出口</h2></div>
@@ -326,8 +327,15 @@
             <span><strong>兜底前先换出口 IP</strong><small>调中继的 <code>/rotate</code>；关掉就复用当前出口。</small></span>
             <input type="checkbox" id="setting-egress-rotate" class="switch">
           </label>
+          <label class="field">
+            <span>领取 / 活动走哪条出口</span>
+            <select class="input" id="setting-claim-egress">
+              <option value="proxy">走代理池中继（默认）</option>
+              <option value="direct">直连</option>
+            </select>
+            <small>代理池全挂时切「直连」，否则领取链路会整条 502；直连的代价是同一 IP 连续领取容易吃 3012。</small>
+          </label>
           <div class="info-row"><span>中继地址</span><code id="egress-proxy">-</code></div>
-        </div>
         </div>
         <div class="card">
           <div class="card-head"><div><div class="card-kicker">上游</div><h2>指纹与额度</h2></div></div>
@@ -523,6 +531,6 @@
 </div>
 
 <div class="toast" id="toast"></div>
-<script src="/app.js?v=13"></script>
+<script src="/app.js?v=14"></script>
 </body>
 </html>

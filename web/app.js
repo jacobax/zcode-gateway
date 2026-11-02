@@ -750,6 +750,7 @@ async function openLog(id) {
         <div class="usage-cell"><span>输出</span><strong>${n(usage.output_tokens)}</strong></div>
         <div class="usage-cell"><span>思考</span><strong>${n(usage.reasoning_tokens)}</strong></div>
       </div>
+    if ($('setting-claim-egress')) $('setting-claim-egress').value = data.settings.claimEgress || 'proxy';
       <div class="detail-label"><span>合计 Tokens</span><strong>${n(total)}</strong></div>
       <div class="detail-label"><span>请求内容</span><span class="muted">${log.requestBody ? '截断预览' : '未保存'}</span></div>
       <pre class="pre-block">${esc(log.requestBody || '（未保存请求内容）')}</pre>
@@ -929,6 +930,7 @@ async function saveSettings() {
       defaultConcurrency: Number($('setting-concurrency').value) || 1,
       autoUpdate: $('setting-autoupdate').checked,
       egressMode: $('setting-egress-mode').value,
+      claimEgress: $('setting-claim-egress').value,
       egressRotate: $('setting-egress-rotate').checked,
     };
     // 明文 token 不回显：只有用户真的输入了、或者点了「清除」才提交这个字段。

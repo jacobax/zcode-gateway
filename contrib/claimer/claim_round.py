@@ -6,7 +6,8 @@
   1. 按额度自动启停：有额度（remaining>0）就启用回池；上游明确回了空余额
      （source=api-empty）且 granted==0，连续 N 轮就禁用，避免它被选号选中后
      给客户端返回 1005。source=local 表示没查成功，不据此禁用。
-  2. 领取：逐个账号（含禁用账号——禁用的只是转发，领卡接口照样能用）问网关有哪些套餐，
+  3. 领到≠能用：领取成功后再刷一次额度，确认真的到账才启用；部分活动有生效时间，
+     没到账的记进 pending_activation，等后续轮次额度出现再自动启用。
      对还没领到的逐条提交领取；验证码用本机 Chromium 跑官方 SDK。
   3. 领到就启用：不管当初是谁禁用的，领取成功后立刻 PATCH enabled=true 并刷新额度。
   4. 记忆：同一 (账号, 套餐) 命中 1001–1005 后 6 小时内不再重试，避免每小时重复解验证码。
@@ -204,6 +205,9 @@ def manage_pass(accounts):
     st = load_quota_state()
     known = {a["id"] for a in accounts}
     st["disabled_by_us"] = [i for i in st["disabled_by_us"] if i in known]
+    # 领取成功但额度还没到账的号：等额度真到账了要能自动启用。
+    st["pending_activation"] = [i for i in (st.get("pending_activation") or []) if i in known]
+    pending = st["pending_activation"]
     streaks = st["empty_streak"]
     enabled = disabled = 0
     now = time.time()
@@ -230,7 +234,7 @@ def manage_pass(accounts):
         if not a.get("enabled") and remaining > 0:
             ours = aid in st["disabled_by_us"]
             marked = bool(DISABLED_MARKER) and DISABLED_MARKER in (a.get("lastError") or "")
-            if not (ours or marked):
+            if not (ours or marked or aid in pending):
                 say(f"  {label}: 有额度 {remaining}，但禁用原因不是脚本/迁移，不动")
                 continue
             if DRY:
@@ -242,6 +246,8 @@ def manage_pass(accounts):
                 enabled += 1
                 if aid in st["disabled_by_us"]:
                     st["disabled_by_us"].remove(aid)
+                if aid in pending:
+                    pending.remove(aid)
                 streaks.pop(aid, None)
                 say(f"  {label}: 有额度 {remaining} → 已启用")
             else:
@@ -374,20 +380,39 @@ def main():
             attempts.pop(f"{aid}|{plan_id}", None)
             say(f"    ✅ 领取成功 {name}")
             if ENABLE_AFTER_CLAIM and not DRY:
-                ecode, eres = api("PATCH", f"/api/accounts/{aid}", {"enabled": True}, timeout=30)
-                if ecode == 200 and eres.get("ok"):
-                    say(f"    ↳ 已启用 {label}")
-                    for item in accounts:
-                        if item.get("id") == aid:
-                            item["enabled"] = True
-                    qstate = load_quota_state()
-                    if aid in qstate["disabled_by_us"]:
-                        qstate["disabled_by_us"].remove(aid)
+                # 领到 ≠ 马上能用：部分活动有生效时间，成功领取后要等到某个时间点
+                # 额度才到账。所以先刷新，确认真的拿到可用额度再启用；没到账就记进
+                # pending_activation，交给后续轮次的 manage_pass 处理。
+                rcode, rres = api("POST", f"/api/accounts/{aid}/refresh", {}, timeout=60)
+                quota = {}
+                if rcode == 200 and isinstance(rres.get("account"), dict):
+                    quota = rres["account"].get("quota") or {}
+                remaining = quota.get("remaining") or 0
+                if remaining > 0:
+                    ecode, eres = api("PATCH", f"/api/accounts/{aid}", {"enabled": True}, timeout=30)
+                    if ecode == 200 and eres.get("ok"):
+                        say(f"    ↳ 额度已到账（{remaining}）→ 已启用 {label}")
+                        for item in accounts:
+                            if item.get("id") == aid:
+                                item["enabled"] = True
+                        qstate = load_quota_state()
+                        if aid in qstate["disabled_by_us"]:
+                            qstate["disabled_by_us"].remove(aid)
+                        pending = qstate.get("pending_activation") or []
+                        if aid in pending:
+                            pending.remove(aid)
+                            qstate["pending_activation"] = pending
                         save_quota_state(qstate)
+                    else:
+                        say(f"    ↳ 启用失败 HTTP {ecode} {str(eres)[:60]}")
                 else:
-                    say(f"    ↳ 启用失败 HTTP {ecode} {str(eres)[:60]}")
-                rcode, _ = api("POST", f"/api/accounts/{aid}/refresh", {}, timeout=60)
-                if rcode == 200:
+                    say("    ↳ 领取成功但额度尚未到账（活动可能有生效时间），下轮再检查")
+                    qstate = load_quota_state()
+                    pending = qstate.get("pending_activation") or []
+                    if aid not in pending:
+                        pending.append(aid)
+                    qstate["pending_activation"] = pending
+                    save_quota_state(qstate)
                     say("    ↳ 已刷新额度")
         else:
             failed += 1

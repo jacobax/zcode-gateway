@@ -131,6 +131,14 @@ func (u *Upstream) EgressProxyURL() string {
 	return u.egressProxyURL
 }
 
+
+// claimHTTPDoer 返回领取/活动调用该用的 HTTPDoer：面板「领取出口」可以选直连或走中继。
+func (s *Server) claimHTTPDoer() HTTPDoer {
+	if s.store.Settings().ClaimEgress == "direct" {
+		return s.upstream
+	}
+	return s.upstream.Claim()
+}
 // claimDoer 让领取/活动这类调用走独立出口，主流量（模型请求、额度刷新）保持直连。
 type claimDoer struct{ c tls_client.HttpClient }
 
