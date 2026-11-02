@@ -583,7 +583,23 @@ async def handle_admin(method, path, query, body, writer):
     global pool, healthy, current, settings
 
     if path == "/rotate":
-        entry = rotate_now("脚本请求")
+        # ?addr=host:port 可以指定某一条出口，方便逐条排查；不带就随机轮换。
+        target = ((query.get("addr") or [""])[0] or "").strip()
+        picked = None
+        if target:
+            picked = next((e for e in healthy if entry_addr(e) == target), None)
+        if picked is not None:
+            current = picked
+            log(f"指定出口 → {entry_addr(current)}，断开 {len(tunnels)} 条隧道")
+            for t in list(tunnels):
+                try:
+                    t.close()
+                except Exception:
+                    pass
+            tunnels.clear()
+            entry = picked
+        else:
+            entry = rotate_now("脚本请求")
         await send_json(writer, "200 OK", {"current": entry_addr(entry) if entry else None})
         return True
 
