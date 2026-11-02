@@ -13,7 +13,8 @@
   - 上游池来自 POOL_FILE，一行一个，支持：
         host:port                 （等价 https://host:port，兼容老数据）
         http://host:port          （明文 CONNECT）
-        https://host:port         （TLS 包装的 CONNECT）
+        https://host:port         （TLS 包装的 CONNECT，不校验代理证书）
+        https+insecure://host:port（同上，别名，兼容别的项目的写法）
         socks5://user:pass@host:port
         socks5h://host:port       （远端解析域名）
     行内 `#` 之后是注释
@@ -104,6 +105,10 @@ def parse_entry(raw):
         scheme = scheme.lower()
     if scheme == "socks5h":
         scheme = "socks5"
+    # https+insecure 是别的项目对「TLS 到代理但不校验证书」的叫法；
+    # 我们的 https 本来就不校验（CERT_NONE），当成同一个东西。
+    if scheme in ("https+insecure", "https-insecure"):
+        scheme = "https"
     if scheme not in ("http", "https", "socks5"):
         return None
     user = pw = None
