@@ -313,6 +313,14 @@ type responsesStream struct {
 	textID    string
 	textBuf   strings.Builder
 
+	// GLM 这类模型先发 thinking block 再发 text block。思考内容在 Responses
+	// 里对应 reasoning item——丢掉它会让「只思考不输出」的回合变成空 output，
+	// 客户端以为模型没回话。
+	reasoningOpen  bool
+	reasoningIndex int
+	reasoningID    string
+	reasoningBuf   strings.Builder
+
 	toolOpen   bool
 	toolIndex  int
 	toolID     string
@@ -374,11 +382,43 @@ func (s *responsesStream) allocIndex() int {
 	return index
 }
 
+func (s *responsesStream) openReasoning() {
+	if s.reasoningOpen {
+		return
+	}
+	s.closeText()
+	s.closeTool()
+	s.reasoningOpen = true
+	s.reasoningID = "rs_" + randomHex(12)
+	s.reasoningIndex = s.allocIndex()
+	s.reasoningBuf.Reset()
+	s.event("response.output_item.added", map[string]any{
+		"output_index": s.reasoningIndex,
+		"item":         map[string]any{"type": "reasoning", "id": s.reasoningID, "summary": []any{}},
+	})
+}
+
+func (s *responsesStream) closeReasoning() {
+	if !s.reasoningOpen {
+		return
+	}
+	s.reasoningOpen = false
+	text := s.reasoningBuf.String()
+	item := map[string]any{
+		"type": "reasoning", "id": s.reasoningID,
+		"summary": []any{map[string]any{"type": "summary_text", "text": text}},
+	}
+	s.event("response.output_item.done", map[string]any{"output_index": s.reasoningIndex, "item": item})
+	s.output = append(s.output, item)
+	s.reasoningBuf.Reset()
+}
+
 func (s *responsesStream) openText() {
 	if s.textOpen {
 		return
 	}
 	s.closeTool()
+	s.closeReasoning()
 	s.textOpen = true
 	s.textID = "msg_" + randomHex(12)
 	s.textIndex = s.allocIndex()
@@ -424,6 +464,7 @@ func (s *responsesStream) openTool(id, name string) {
 		s.closeTool()
 	}
 	s.closeText()
+	s.closeReasoning()
 	s.toolOpen = true
 	s.toolID = "fc_" + randomHex(12)
 	s.toolCallID = id
@@ -474,6 +515,7 @@ func (s *responsesStream) feed(line string) bool {
 		Delta struct {
 			Type       string `json:"type"`
 			Text       string `json:"text"`
+			Thinking   string `json:"thinking"`
 			StopReason string `json:"stop_reason"`
 		} `json:"delta"`
 		ContentBlock struct {
@@ -506,11 +548,19 @@ func (s *responsesStream) feed(line string) bool {
 		switch event.ContentBlock.Type {
 		case "tool_use":
 			s.openTool(event.ContentBlock.ID, event.ContentBlock.Name)
+		case "thinking", "redacted_thinking":
+			s.openReasoning()
 		case "text":
 			s.openText()
 		}
 	case "content_block_delta":
 		switch event.Delta.Type {
+		case "thinking_delta":
+			if event.Delta.Thinking != "" {
+				s.openReasoning()
+				s.reasoningBuf.WriteString(event.Delta.Thinking)
+				produced = true
+			}
 		case "text_delta":
 			if event.Delta.Text != "" {
 				s.openText()
@@ -534,6 +584,9 @@ func (s *responsesStream) feed(line string) bool {
 		if s.toolOpen {
 			s.closeTool()
 		}
+		if s.reasoningOpen {
+			s.closeReasoning()
+		}
 	case "message_delta":
 		if event.Usage.OutputTokens > 0 {
 			s.usage.OutputTokens = event.Usage.OutputTokens
@@ -549,6 +602,7 @@ func (s *responsesStream) done() {
 	s.ensureStarted()
 	s.closeText()
 	s.closeTool()
+	s.closeReasoning()
 	status := "completed"
 	if !s.finished {
 		// 上游没给 stop_reason 就断了：如实报 incomplete，别假装成功。

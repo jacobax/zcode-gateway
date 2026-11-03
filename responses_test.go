@@ -183,3 +183,32 @@ func TestResponsesStreamToolCall(t *testing.T) {
 		t.Fatalf("arguments not accumulated:\n%s", out)
 	}
 }
+
+// 先思考后输出的模型：thinking block 要变成 reasoning item，text 照常输出。
+// 丢掉 thinking 会让「只思考不输出」的回合变成空 output，客户端以为模型没回话。
+func TestResponsesStreamThinking(t *testing.T) {
+	rec := httptest.NewRecorder()
+	stream := newResponsesStream(rec, "glm")
+	for _, line := range []string{
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"let me think"}}`,
+		`data: {"type":"content_block_stop","index":0}`,
+		`data: {"type":"content_block_start","index":1,"content_block":{"type":"text"}}`,
+		`data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"pong"}}`,
+		`data: {"type":"content_block_stop","index":1}`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}`,
+	} {
+		stream.feed(line + "\n")
+	}
+	stream.done()
+
+	out := rec.Body.String()
+	for _, want := range []string{`"type":"reasoning"`, `"text":"let me think"`, `"text":"pong"`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in stream output:\n%s", want, out)
+		}
+	}
+	if len(stream.output) != 2 {
+		t.Fatalf("want 2 output items (reasoning + message), got %d", len(stream.output))
+	}
+}

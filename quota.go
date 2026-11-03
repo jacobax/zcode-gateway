@@ -33,10 +33,13 @@ func (s *Server) refreshAllQuotas(ctx context.Context) {
 	done := make(chan struct{}, len(accounts))
 	spawned := 0
 	for _, acc := range accounts {
-		if !acc.Enabled {
+		// 禁用的号也要刷，但只刷「额度待生效」的：它们被禁用唯一的原因就是
+		// 额度还没到 effective_at，不刷新就永远发现不了到账——claimer 靠
+		// remaining > 0 决定启用，网关不更新它就只能永远等下去。
+		// 真正停用的号（401 / 手动禁用 / 上游确认没套餐）不刷，省掉无谓请求。
+		if !acc.Enabled && acc.Quota.Source != "api-pending" {
 			continue
 		}
-		acc := acc
 		sem <- struct{}{}
 		spawned++
 		go func() {
