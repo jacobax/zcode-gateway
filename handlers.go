@@ -592,6 +592,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"ok": true, "version": s.version, "build": buildVersion, "uptime": time.Since(s.start).Seconds(),
 		"accounts": len(s.store.Summaries()),
 		"pool":     map[string]any{"inFlight": inFlight, "forcedReleases": forced},
+		// 活动/领取上报的客户端版本，见 claimversion.go。放这里是为了排查
+		// 「明明有活动却看不到横幅」时能一眼确认当前用的是哪个版本、从哪来的。
+		"claimVersion": claimVersionStatus(),
 	})
 }
 

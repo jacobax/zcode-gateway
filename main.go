@@ -83,6 +83,9 @@ func main() {
 	if claimProxy := upstream.ClaimProxyURL(); claimProxy != "" {
 		log.Printf("claim/activity proxy: %s", proxyDisplay(claimProxy))
 	}
+	// 启动就先把活动客户端版本刷出来，别等第一次领取才发现版本过旧。
+	// 异步执行，拉不到也不影响启动（回落 claimVersionFloor）。
+	ensureClaimVersion()
 	log.Printf("zcode-gateway %s listening on %s (data=%s)", appVersion, baseURL, dataDir)
 	if server.adminGenerated {
 		log.Printf("admin panel password (set ZCODE_ADMIN_PASSWORD to override): %s", server.adminPass)

@@ -38,6 +38,10 @@ type storedFile struct {
 	Settings Settings        `json:"settings"`
 }
 
+// defaultClaimWindow 是新建实例（以及缺 claimWindow 字段的老配置）用的领取时段。
+// 19:00 是活动常见开闸点，见 store.go 里 load() 的注释。
+const defaultClaimWindow = "19-21"
+
 type storedAccount struct {
 	Account
 	Secrets map[string]string `json:"secrets"`
@@ -49,7 +53,7 @@ func NewStore(dir string) (*Store, error) {
 	}
 	s := &Store{
 		dir:      dir,
-		settings: Settings{Fingerprint: true, StoreBodies: true, QuotaIntervalSec: 30, DefaultConcurrency: 1, PromptMode: "append", UAProfile: "zcode", ClaimWindow: "19,20"},
+		settings: Settings{Fingerprint: true, StoreBodies: true, QuotaIntervalSec: 30, DefaultConcurrency: 1, PromptMode: "append", UAProfile: "zcode", ClaimWindow: defaultClaimWindow},
 	}
 	if err := s.loadMasterKey(); err != nil {
 		return nil, err
@@ -215,13 +219,17 @@ func (s *Store) load() error {
 		file.Settings.Fingerprint = true
 	}
 	// ClaimWindow 的 "" 是合法值（不限时段），所以不能像上面那样按空值兜底，
-	// 得看 JSON 里到底有没有这个 key——没有才是老文件，补上默认的 19,20。
+	// 得看 JSON 里到底有没有这个 key——没有才是老文件，补上默认的 19-21。
+	//
+	// 默认给三段而不是两段：活动多半在 19:00 开闸，19:03 那轮抢名额，20:03 补
+	// 首轮失败的号，21:03 兜住「晚一两个小时才开」的活动。已经领到的号在本地
+	// 比对后直接跳过，不花时间，所以多排一轮几乎不增加成本。
 	var keyProbe struct {
 		Settings map[string]json.RawMessage `json:"settings"`
 	}
 	if json.Unmarshal(data, &keyProbe) == nil {
 		if _, ok := keyProbe.Settings["claimWindow"]; !ok {
-			file.Settings.ClaimWindow = "19,20"
+			file.Settings.ClaimWindow = defaultClaimWindow
 		}
 	}
 	s.settings = file.Settings

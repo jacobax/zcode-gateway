@@ -124,6 +124,7 @@ function setView(view) {
   $('page-subtitle').textContent = titles[view][1];
   if (view === 'logs') loadLogs();
   if (view === 'settings') { loadSettings(); loadProxies(); }
+  if (view === 'accounts') resumeClaim();
 }
 
 async function loadOverview() {
@@ -462,21 +463,13 @@ async function refreshAccount(id) {
 // 不能做成一个长请求。
 let claimPoll = null;
 
-function renderClaimProgress(job) {
-  const btn = $('claim-all');
-  if (!btn) return;
-  if (job && job.running) {
-    btn.disabled = true;
-    btn.textContent = `领取中 ${job.done}/${job.total} · 成功 ${job.claimed}`;
-  } else {
-    btn.disabled = false;
-    btn.textContent = '领取全部';
-  }
-}
-
 // 领取时段建议：按账号数估一轮要跑多久，提醒两轮间隔够不够。
 // 单号 ≈ 40 秒（换出口 + 解验证码 + 领取 + 刷新额度）。
 const CLAIM_SEC_PER_ACCOUNT = 40;
+
+function claimEstimate(count) {
+  return Math.max(1, Math.ceil((Number(count) * CLAIM_SEC_PER_ACCOUNT) / 60));
+}
 
 function parseClaimWindow(raw) {
   const hours = new Set();
@@ -498,7 +491,7 @@ function updateClaimWindowHint() {
   const el = $('claim-window-hint');
   if (!el) return;
   const count = (state.accounts || []).length;
-  const minutes = Math.max(1, Math.ceil((count * CLAIM_SEC_PER_ACCOUNT) / 60));
+  const minutes = claimEstimate(count);
   const hours = parseClaimWindow($('setting-claim-window').value);
   const head = `当前 ${count} 个账号，一轮约 ${minutes} 分钟（每个号约 ${CLAIM_SEC_PER_ACCOUNT} 秒）。`;
   if (!hours.length) {
@@ -521,6 +514,68 @@ function updateClaimWindowHint() {
   }
 }
 
+function renderClaimProgress(job) {
+  const btn = $('claim-all');
+  if (!btn) return;
+  if (job && job.running) {
+    btn.disabled = true;
+    const total = Number(job.total) || 0;
+    const done = Number(job.done) || 0;
+    btn.textContent = total
+      ? `领取中 ${done}/${total} · 成功 ${Number(job.claimed) || 0}`
+      : '领取中…';
+  } else {
+    btn.disabled = false;
+    btn.textContent = '领取全部';
+  }
+}
+
+// renderClaimResult 把一轮领取的结果摊在账号页顶部：成功/失败/跳过各多少，
+// 失败的是哪些号、为什么。以前只有一句 toast，失败原因得自己去翻日志。
+function renderClaimResult(job) {
+  const box = $('claim-result');
+  if (!box) return;
+  const results = (job && job.results) || [];
+  if (!results.length) {
+    box.classList.add('hidden');
+    box.innerHTML = '';
+    return;
+  }
+  const ok = results.filter((r) => r.ok);
+  const fails = results.filter((r) => !r.ok && !r.skipped);
+  const skips = results.filter((r) => r.skipped);
+  const seconds = Math.max(0, (Number(job.finishedAt) || 0) - (Number(job.startedAt) || 0));
+  const elapsed = seconds >= 60
+    ? `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`
+    : `${seconds} 秒`;
+
+  const parts = [
+    `<div class="claim-result-title">领取结束：成功 ${ok.length} · 失败 ${fails.length} · 跳过 ${skips.length}（共 ${results.length} 个账号）</div>`,
+  ];
+  if (fails.length) {
+    parts.push('<div class="claim-result-fails">');
+    for (const fail of fails.slice(0, 20)) {
+      const code = fail.code ? `code=${fail.code} ` : '';
+      const name = esc(fail.label || fail.accountId || '未知账号');
+      parts.push(`<div><span class="name">${name}</span><span class="why">${esc(code + (fail.message || '未知错误'))}</span></div>`);
+    }
+    if (fails.length > 20) {
+      parts.push(`<div class="why">…另有 ${fails.length - 20} 个，见日志</div>`);
+    }
+    parts.push('</div>');
+  }
+  const plans = [...new Set(ok.map((r) => r.planName).filter(Boolean))];
+  const meta = [`耗时 ${elapsed}`];
+  if (plans.length) meta.push(`领到套餐 ${plans.join('、')}`);
+  if (skips.length) meta.push('跳过 = 本地已有这份套餐，没有再请求上游');
+  parts.push(`<div class="claim-result-meta">${esc(meta.join(' · '))}</div>`);
+
+  box.innerHTML = parts.join('');
+  box.classList.remove('hidden');
+  box.classList.toggle('all-ok', fails.length === 0);
+  box.classList.toggle('has-fail', fails.length > 0);
+}
+
 async function pollClaim() {
   try {
     const job = await api('/api/claim');
@@ -528,6 +583,7 @@ async function pollClaim() {
     if (job.running) return;
     clearInterval(claimPoll);
     claimPoll = null;
+    renderClaimResult(job);
     const results = job.results || [];
     const fails = results.filter((r) => !r.ok && !r.skipped);
     const skips = results.filter((r) => r.skipped);
@@ -542,13 +598,38 @@ async function pollClaim() {
   }
 }
 
+// resumeClaim 在页面加载/切到账号页时接上正在跑的任务。
+// 不接的话刷新一次页面就看不到进度了，只能盯着按钮猜。
+async function resumeClaim() {
+  if (claimPoll) return;
+  try {
+    const job = await api('/api/claim');
+    renderClaimProgress(job);
+    if (job.running) {
+      claimPoll = setInterval(pollClaim, 3000);
+      return;
+    }
+    renderClaimResult(job);
+  } catch (error) {
+    /* 启动阶段静默：未登录时由 api() 统一跳转，别重复弹错 */
+  }
+}
+
 async function startClaim(accountIds) {
   try {
     const body = accountIds && accountIds.length ? { accountIds } : {};
     const res = await api('/api/claim', { method: 'POST', body: JSON.stringify(body) });
-    renderClaimProgress(res.job || { running: true, done: 0, total: 0, claimed: 0 });
+    const job = res.job || { running: true, done: 0, total: 0, claimed: 0 };
+    renderClaimProgress(job);
+    const box = $('claim-result');
+    if (box) {
+      box.classList.add('hidden');
+      box.innerHTML = '';
+    }
     if (!claimPoll) claimPoll = setInterval(pollClaim, 3000);
-    toast('已开始领取，进度看「领取全部」按钮');
+    const total = Number(job.total) || 0;
+    const scope = accountIds && accountIds.length ? `${total} 个账号` : `全部 ${total} 个账号`;
+    toast(`已开始领取（${scope}），预计 ${claimEstimate(total)} 分钟`);
   } catch (error) {
     toast(error.message, true);
   }
@@ -1470,6 +1551,7 @@ loadOverview();
 loadAccounts();
 loadSettings();
 setTimeout(loadLogs, 200);
+resumeClaim();
 setInterval(() => {
   loadOverview();
   if (state.view === 'accounts') loadAccounts();

@@ -341,14 +341,19 @@ func (s *Server) profileHeaders(acc *Account) map[string]string {
 }
 
 // claimHeaders 是活动/领取这一族的请求头：设备身份和指纹跟模型请求完全一致，
-// 只把客户端版本换成一个新的。上游的活动按版本下发——报 3.16.3 时
-// marketing/touch 回空、领取回 1004；报 3.17.1 才有横幅、领取才 200。
-// 而模型请求用 3.17.1 会被判 3012，所以两边必须用不同的版本号。
+// 只把客户端版本换成活动接口认的那个（claimAppVersion()，见 claimversion.go）。
+// 上游的活动按版本下发——低于门槛时 marketing/touch 回空、领取回 1004；
+// 而模型请求报新版本会被判 3012，所以两边必须用不同的版本号。
+//
+// 这里顺带触发一次版本号刷新：活动探测是唯一需要它的路径，放在热路径上
+// 惰性刷新比单开一个 ticker 更省事，且不会在没人用领取功能时联网。
 func (s *Server) claimHeaders(acc *Account) map[string]string {
+	ensureClaimVersion()
+	version := claimAppVersion()
 	h := s.profileHeaders(acc)
-	if claimAppVersion != "" && claimAppVersion != appVersion {
-		h["User-Agent"] = "ZCode/" + claimAppVersion
-		h["X-ZCode-App-Version"] = claimAppVersion
+	if version != "" && version != appVersion {
+		h["User-Agent"] = "ZCode/" + version
+		h["X-ZCode-App-Version"] = version
 	}
 	return h
 }

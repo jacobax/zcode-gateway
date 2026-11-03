@@ -13,6 +13,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -102,6 +103,19 @@ func claim3012Retries() int {
 	return 2
 }
 
+// claimSolverRetries 是解验证码失败后换出口重试的次数。
+//
+// 默认 1：实测换个中继出口重来一次基本都能过（2026-11-03 首轮 64 号有 5 个
+// solver 失败，轮换出口后 5/5 一次通过）。再多就是白白拉长整轮时间，不值得。
+func claimSolverRetries() int {
+	if raw := strings.TrimSpace(envOr("ZCODE_CLAIM_SOLVER_RETRIES", "")); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v >= 0 {
+			return v
+		}
+	}
+	return 1
+}
+
 // claimSolverProxy 返回解验证码时 Chromium 该走的出口。
 //
 // 必须和 claimDoers() 的第一跳一致：阿里云的 captchaVerifyParam 绑 IP，
@@ -158,7 +172,7 @@ func (s *Server) solveCaptcha(ctx context.Context, scene, region, prefix string)
 		if ctx.Err() != nil {
 			return "", fmt.Errorf("求解超时")
 		}
-		return "", fmt.Errorf("求解器执行失败: %v", err)
+		return "", fmt.Errorf("求解器执行失败: %v%s", err, solverStderr(err))
 	}
 	for _, line := range strings.Split(string(out), "\n") {
 		line = strings.TrimSpace(line)
@@ -171,6 +185,30 @@ func (s *Server) solveCaptcha(ctx context.Context, scene, region, prefix string)
 		}
 	}
 	return "", fmt.Errorf("求解器没有输出 captchaVerifyParam")
+}
+
+// solverStderr 把 solver 打到 stderr 的诊断信息带出来。
+//
+// node 侧每次失败都会写一行 `[pw] 第 N/3 次：…`（MemAvailable 不足 / 未产出
+// verifyParam / launch 异常）。只报 "exit status 4" 等于什么都没说，线上根本
+// 分不清是内存不够还是验证码页面没加载出来。
+func solverStderr(err error) string {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || len(exitErr.Stderr) == 0 {
+		return ""
+	}
+	lines := strings.Split(strings.TrimSpace(string(exitErr.Stderr)), "\n")
+	if len(lines) > 3 {
+		lines = lines[len(lines)-3:]
+	}
+	for i := range lines {
+		lines[i] = strings.TrimSpace(lines[i])
+	}
+	detail := strings.Join(lines, " | ")
+	if detail == "" {
+		return ""
+	}
+	return "（" + detail + "）"
 }
 
 // claimOneAccount 对单个账号走完整流程：查活动 → 选一个可领的 → 换出口 →
@@ -210,10 +248,16 @@ func (s *Server) claimOneAccount(ctx context.Context, acc *Account, wantPlan str
 	}
 
 	retries := claim3012Retries()
+	solverRetries := claimSolverRetries()
+	solverFails := 0
 	last := out
 	for attempt := 0; attempt <= retries; attempt++ {
 		if attempt > 0 {
-			s.claim.logf("%s: 3012 风控，换出口重试 %d/%d", acc.Label, attempt, retries)
+			if last.Code == 3012 {
+				s.claim.logf("%s: 3012 风控，换出口重试 %d/%d", acc.Label, attempt, retries)
+			} else {
+				s.claim.logf("%s: %s，换出口重试 %d/%d", acc.Label, last.Message, attempt, retries)
+			}
 			time.Sleep(claimGap())
 		}
 		// 顺序不能反：先换出口，再解验证码，最后用同一出口领取
@@ -224,7 +268,13 @@ func (s *Server) claimOneAccount(ctx context.Context, acc *Account, wantPlan str
 			if err != nil {
 				last = claimOutcome{AccountID: acc.ID, Label: acc.Label,
 					PlanID: plan.PlanID, PlanName: plan.Name, Message: err.Error()}
-				return last
+				// Chromium 在共享小内存盒上会闪退，换个出口重来一次通常就好了。
+				// 连续失败超过预算才认输，别把整轮时间全耗在一个号上。
+				solverFails++
+				if solverFails > solverRetries {
+					return last
+				}
+				continue
 			}
 			param, region = p, captcha.Region
 		}

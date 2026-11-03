@@ -7,7 +7,8 @@ import (
 	"testing"
 )
 
-// 老文件没有 claimWindow 字段时，要补上默认的 19,20；
+// 老文件没有 claimWindow 字段时，要补上默认时段（defaultClaimWindow）；
+// 而显式写成 "" 的（用户故意设成不限时段）必须保留成空。
 // 而显式写成 "" 的（用户故意设成不限时段）必须保留成空。
 func TestClaimWindowDefaultBackfill(t *testing.T) {
 	cases := []struct {
@@ -15,7 +16,7 @@ func TestClaimWindowDefaultBackfill(t *testing.T) {
 		file string
 		want string
 	}{
-		{"老文件无字段", `{"version":1,"settings":{"quotaIntervalSec":30},"accounts":[]}`, "19,20"},
+		{"老文件无字段", `{"version":1,"settings":{"quotaIntervalSec":30},"accounts":[]}`, defaultClaimWindow},
 		{"显式空=不限", `{"version":1,"settings":{"claimWindow":""},"accounts":[]}`, ""},
 		{"显式设置", `{"version":1,"settings":{"claimWindow":"9,10"},"accounts":[]}`, "9,10"},
 	}
@@ -37,14 +38,14 @@ func TestClaimWindowDefaultBackfill(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := store.Settings().ClaimWindow; got != "19,20" {
+	if got := store.Settings().ClaimWindow; got != defaultClaimWindow {
 		t.Fatalf("新库默认值: got %q", got)
 	}
 	// 序列化后能被前端读到
 	raw, _ := json.Marshal(store.Settings())
 	var back map[string]any
 	_ = json.Unmarshal(raw, &back)
-	if back["claimWindow"] != "19,20" {
+	if back["claimWindow"] != defaultClaimWindow {
 		t.Fatalf("JSON 字段名不对: %v", back["claimWindow"])
 	}
 }

@@ -122,7 +122,7 @@ func (s *Server) reportActivation(ctx context.Context, acc *Account) []string {
 			"event_extra_detail": map[string]any{},
 			"user_id":            userID,
 			"screen_resolution":  p.Screen,
-			"app_version":        claimAppVersion,
+			"app_version":        claimAppVersion(),
 			"device_os_category": func() string {
 				if p.Platform == "darwin" {
 					return "macos"
@@ -138,7 +138,7 @@ func (s *Server) reportActivation(ctx context.Context, acc *Account) []string {
 			"marketing_params":  "{}",
 		}
 		data, _ := json.Marshal(body)
-		headers := map[string]string{"Content-Type": "application/json", "User-Agent": "ZCode/" + claimAppVersion}
+		headers := map[string]string{"Content-Type": "application/json", "User-Agent": "ZCode/" + claimAppVersion()}
 		callCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
 		resp, err := s.claimRequest(callCtx, "POST", zcodeAPIBase+"/api/v1/event/report", headers, data)
 		if err != nil {
@@ -244,7 +244,7 @@ func activityResponseMessage(parsed map[string]any, status int) string {
 
 func (s *Server) currentPlans(ctx context.Context, acc *Account) (map[string]string, error) {
 	parsed, _, err := s.zcodeAPICall(ctx, acc, "GET", "/api/v1/zcode-plan/billing/current", url.Values{
-		"app_version": {claimAppVersion},
+		"app_version": {claimAppVersion()},
 	}, nil, nil)
 	if err != nil {
 		return nil, err
@@ -315,7 +315,7 @@ func (s *Server) detectActivities(ctx context.Context, acc *Account) (*ActivityS
 	}
 
 	preview, _, previewErr := s.zcodeAPICall(ctx, acc, "GET", "/api/v1/zcode-plan/billing/preview", url.Values{
-		"app_version": {claimAppVersion},
+		"app_version": {claimAppVersion()},
 		"platform":    {platform},
 	}, nil, nil)
 	if previewErr != nil {
@@ -414,7 +414,7 @@ func (s *Server) detectActivities(ctx context.Context, acc *Account) (*ActivityS
 	})
 	var captcha *ActivityCaptcha
 	if configs, _, cfgErr := s.zcodeAPICall(ctx, acc, "GET", "/api/v1/client/configs", url.Values{
-		"app_version": {claimAppVersion},
+		"app_version": {claimAppVersion()},
 		"platform":    {platform},
 	}, nil, nil); cfgErr == nil {
 		cfg := activityMap(activityMap(configs["data"])["configs"])

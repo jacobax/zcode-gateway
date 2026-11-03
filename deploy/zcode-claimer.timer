@@ -2,8 +2,10 @@
 Description=Hourly ZCode plan auto-claim round
 
 [Timer]
-# 每小时 :17 跑一轮（错开整点；套餐投放是抢名额制，想更快就把 17 改成 */10）
-OnCalendar=*-*-* *:17:00
+# 每小时 :03 跑一轮。活动通常在整点开闸（实测 19:00），早跑早抢：
+# 64 个号一轮要 40+ 分钟，:17 开跑等于白丢 17 分钟，火爆的活动可能已经领完。
+# RandomizedDelaySec 让多台机器不要同时打上游，2 分钟抖动仍在安全范围内。
+OnCalendar=*-*-* *:03:00
 Persistent=true
 RandomizedDelaySec=120
 

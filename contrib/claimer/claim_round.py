@@ -72,10 +72,11 @@ RELAY_ROTATE_URL = os.environ.get("ZC_RELAY_ROTATE_URL", "")
 RELAY_PROXY_URL = os.environ.get("ZC_RELAY_PROXY_URL", "")
 if not RELAY_PROXY_URL and RELAY_ROTATE_URL:
     RELAY_PROXY_URL = RELAY_ROTATE_URL.rsplit("/rotate", 1)[0]
-# 只在活动开放的那几个小时里真去领取。上游通常北京时间 19:00 开闸，19:xx 和
-# 20:xx 两轮就够把全号过一遍 + 重试；其它时段跑只会白解验证码。
+# 只在活动开放的那几个小时里真去领取。上游通常北京时间 19:00 开闸，19:03 那轮
+# 抢名额，20:03 补首轮失败的号，21:03 兜住「晚一两个小时才开」的活动。
+# 已经领到的号在本地比对后直接跳过，多排一轮几乎不花时间。
 # 留空或 "*" = 不限时段。额度启停（manage_pass）不受影响，照常每小时跑。
-CLAIM_WINDOW = os.environ.get("ZC_CLAIM_WINDOW", "19,20")
+CLAIM_WINDOW = os.environ.get("ZC_CLAIM_WINDOW", "19-21")
 CLAIM_TZ = os.environ.get("ZC_CLAIM_TZ", "Asia/Shanghai")
 # 领取出口模式，登录后从面板读。决定 solver 该不该也走中继（必须和领取同 IP）。
 CLAIM_EGRESS = os.environ.get("ZC_CLAIM_EGRESS", "proxy")
