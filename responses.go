@@ -636,6 +636,10 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 	stream, _ := body["stream"].(bool)
 	model, _ := body["model"].(string)
+	if model != "" && !modelAllowed(model) {
+		writeOpenAIError(w, 400, "model not allowed: "+model)
+		return
+	}
 	if model == "" {
 		model = "GLM-5.3-Flash"
 	}

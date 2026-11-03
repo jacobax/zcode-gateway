@@ -136,6 +136,42 @@ zcode-claimer.timer（每小时 :17）──► 面板管理接口 ──► 上
 非流式 260 / 流式 0）。这是上游行为，不是网关丢数据——按 token 计费的
 统计要么走非流式口径，要么用本地估算。
 
+## 端点映射（抗变更）
+
+上游通过 `GET /api/v1/agent/configs` 下发「客户端 base URL → 实际端点」映射。
+实测 2026-11-03：
+
+````json
+{"data":{"proxyEndpoint":{"mapping":[
+  {"from":"https://open.bigmodel.cn/api/anthropic/v1/messages",
+   "to":"https://zcode.z.ai/api/v1/ultra/anthropic/v1/messages",
+   "zcodeAuthorizationHeader":"X-Zcode-Authorization"}]}}}
+````
+
+我们原来把 `ultra` / `ultra-zai` 写死在 `upstream.go` 里，上游一改映射就全挂。
+现在 `endpointmap.go` 缓存这张表（TTL 5 分钟、失败 30 秒后重试、超时 3 秒、
+上限 256 条），命中就用，没命中回落到硬编码。
+
+三条硬约束：
+
+- **严格 fail-open**：抓取/解析失败保留旧快照，绝不因为拿不到映射就拒绝服务
+- **只接受 https 目标**：映射是服务端下发的，但降级到明文的代价太大（JWT 裸奔）
+- **`ZCODE_UPSTREAM` 优先级最高**：调试和测试仍然可以强制指定端点，绕过整张表
+
+`zcodeAuthorizationHeader` 标记要求把 zcode JWT 以 `X-Zcode-Authorization`
+附到改写后的请求上——coding-plan 那条路径本来就这么做。
+
+start-plan 不走这套：它不在客户端配置里，上游也不会给它下发映射。
+
+## 模型白名单
+
+`ZCODE_MODEL_ALLOWLIST=GLM-5.3,GLM-4.6`（逗号分隔，大小写不敏感），空 = 不限制。
+
+设了之后，客户端请求了不在表里的模型会直接 400，不打上游——上游对不认识的
+模型回 400/1005，白白花一次请求还会在账号上留一条失败记录。
+
+只校验客户端**显式传**的 model；不传时用默认值 `GLM-5.3-Flash`，不走白名单。
+
 ## 领取退避
 
 `1005 名额用完` 的上游回执带 `next_at` 时，网关把它记进账号的 `claimBlockedUntil`，
@@ -304,6 +340,11 @@ TLS）→ CONNECT → 对目标再做一次 TLS → 发 `GET /api/v1/client/conf
     只处理 text 会让「思考把 max_output_tokens 吃满」的回合返回空 output——
     客户端以为模型没回话。现在 thinking 转成 Responses 的 reasoning item。
     实测 32 token 时确实空，400 token 才正常。
+
+20. **`ZCODE_UPSTREAM` 是端到端测试的唯一入口**。`gateway_test.go` 里所有
+    真发请求的用例都靠它把上游指到 `httptest`。改端点选择逻辑（比如加映射表）
+    时如果把 override 弄丢，测试不会明显报「端点算错了」，而是全部变成 401
+    ——请求打到了真实上游，用假 token 被拒。看到一批测试同时 401 先查这里。
 
 ## 出口 IP 与风控
 

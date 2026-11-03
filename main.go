@@ -63,6 +63,7 @@ func main() {
 	mux.HandleFunc("/v1/responses", server.handleResponses)
 	mux.HandleFunc("/v1/models", server.handleModels)
 	mux.HandleFunc("/health", server.handleHealth)
+	mux.HandleFunc("/metrics", server.handleMetrics)
 	mux.Handle("/", server.webHandler())
 
 	handler := cors(logRequests(mux))

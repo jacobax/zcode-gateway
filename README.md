@@ -31,8 +31,9 @@
 | `POST /v1/responses` | OpenAI Responses | Codex CLI 及只认 Responses 形状的客户端 |
 | `GET /v1/models` | 模型列表 | — |
 | `GET /health` | 存活探测（含账号数、在途请求、构建版本、活动客户端版本） | systemd / 监控 |
+| `GET /metrics` | Prometheus 指标（账号池状态、额度、按模型用量） | Prometheus / Grafana |
 
-鉴权：面板里设了「代理 Token」后，三个入口都要带 `Authorization: Bearer <token>`
+鉴权：面板里设了「代理 Token」后，所有入口都要带 `Authorization: Bearer <token>`
 或 `x-api-key: <token>`；留空表示本机免鉴权（只建议在回环地址上这么做）。
 
 ```bash
@@ -51,18 +52,38 @@ curl -s http://127.0.0.1:8787/v1/responses \
   -d '{"model":"GLM-5.3","input":"hi","max_output_tokens":64}'
 ```
 
-```bash
-# Anthropic 风格
-export ANTHROPIC_BASE_URL=http://127.0.0.1:8787
-export ANTHROPIC_AUTH_TOKEN=<token>
-
-# OpenAI 风格
-curl -s http://127.0.0.1:8787/v1/chat/completions \
-  -H "Authorization: Bearer <token>" -H "content-type: application/json" \
-  -d '{"model":"GLM-5.3","messages":[{"role":"user","content":"hi"}]}'
-```
-
 面板「设置 → 客户端接入指引」会按当前 Base URL / Token 生成可直接复制的示例。
+
+## 监控
+
+`GET /metrics` 输出 Prometheus 0.0.4 格式，鉴权和 `/v1` 一样走代理 Token：
+
+````yaml
+scrape_configs:
+  - job_name: zcode-gateway
+    metrics_path: /metrics
+    authorization:
+      credentials: <代理 Token>
+    static_configs:
+      - targets: ["127.0.0.1:8787"]
+````
+
+指标面：
+
+| 指标 | 类型 | 说明 |
+|---|---|---|
+| `zcg_pool_accounts{state}` | gauge | 账号池按状态分布（healthy / cooling / exhausted / pending / disabled） |
+| `zcg_pool_in_flight` | gauge | 在途上游请求数 |
+| `zcg_pool_forced_releases` | counter | 并发槽被看门狗强制释放的累计次数 |
+| `zcg_account_quota_remaining{account}` | gauge | 账号剩余额度 |
+| `zcg_account_quota_granted{account}` | gauge | 账号授予额度 |
+| `zcg_account_requests_total{account}` | counter | 账号累计请求数 |
+| `zcg_model_requests_total{model}` | counter | 按模型的累计请求数 |
+| `zcg_model_tokens_total{model,type}` | counter | 按模型与类型的 token（input/output/cache_read/cache_write/reasoning） |
+| `zcg_build_info{build,app_version,claim_version}` | gauge | 构建版本与两个模拟客户端版本 |
+
+所有指标在 scrape 时现算，不额外维护累加器；同一状态两次抓取逐字节相同，
+看板不会抖。
 
 ## 快速开始
 

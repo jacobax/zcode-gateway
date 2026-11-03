@@ -596,6 +596,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		// 活动/领取上报的客户端版本，见 claimversion.go。放这里是为了排查
 		// 「明明有活动却看不到横幅」时能一眼确认当前用的是哪个版本、从哪来的。
 		"claimVersion": claimVersionStatus(),
+		"endpointMap": endpointMapStatus(),
 	})
 }
 
@@ -651,6 +652,10 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	stream, _ := body["stream"].(bool)
 	model, _ := body["model"].(string)
+	if model != "" && !modelAllowed(model) {
+		writeError(w, 400, "model not allowed: "+model)
+		return
+	}
 	if model == "" {
 		model = "GLM-5.3-Flash"
 	}
@@ -698,6 +703,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	stream, _ := body["stream"].(bool)
 	model, _ := body["model"].(string)
+	if model != "" && !modelAllowed(model) {
+		writeOpenAIError(w, 400, "model not allowed: "+model)
+		return
+	}
 	if model == "" {
 		model = "GLM-5.3-Flash"
 	}

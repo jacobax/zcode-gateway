@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	fhttp "github.com/bogdanfinn/fhttp"
+	"log"
 	"net/url"
 	"os"
 	"strings"
@@ -137,12 +137,12 @@ func (u *Upstream) EgressProxyURL() string {
 	return u.egressProxyURL
 }
 
-
 // claimDoers 按面板设置排出领取/活动调用的出口顺序：
-//   direct          仅直连
-//   direct_fallback 直连优先，传输层失败再走代理
-//   proxy           仅代理
-//   proxy_fallback  代理优先，传输层失败再直连
+//
+//	direct          仅直连
+//	direct_fallback 直连优先，传输层失败再走代理
+//	proxy           仅代理
+//	proxy_fallback  代理优先，传输层失败再直连
 func (s *Server) claimDoers() []HTTPDoer {
 	direct := HTTPDoer(s.upstream)
 	if !s.upstream.HasClaimProxy() {
@@ -181,6 +181,7 @@ func (s *Server) claimRequest(ctx context.Context, method, target string, header
 	}
 	return nil, lastErr
 }
+
 // claimDoer 让领取/活动这类调用走独立出口，主流量（模型请求、额度刷新）保持直连。
 type claimDoer struct{ c tls_client.HttpClient }
 
@@ -278,10 +279,18 @@ func (s *Server) forward(ctx context.Context, acc *Account, body map[string]any,
 
 	endpoint := "https://zcode.z.ai/api/v1/zcode-plan/anthropic/v1/messages"
 	if acc.Mode == "coding-plan" {
+		logical := logicalEndpointZai
 		if acc.Provider == "bigmodel" {
+			logical = logicalEndpointBigmodel
 			endpoint = "https://zcode.z.ai/api/v1/ultra/anthropic/v1/messages"
 		} else {
 			endpoint = "https://zcode.z.ai/api/v1/ultra-zai/anthropic/v1/messages"
+		}
+		// 上游通过 agent/configs 下发「客户端 base URL → 实际端点」映射，
+		// 命中就用它。上面的硬编码只是映射还没拉回来时的兜底。
+		s.ensureEndpointMap(ctx, acc)
+		if mapped := resolveEndpoint(logical); mapped != "" {
+			endpoint = mapped
 		}
 	}
 	if override := strings.TrimSpace(os.Getenv("ZCODE_UPSTREAM")); override != "" {
