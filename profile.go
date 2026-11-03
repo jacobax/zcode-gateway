@@ -340,6 +340,19 @@ func (s *Server) profileHeaders(acc *Account) map[string]string {
 	return h
 }
 
+// claimHeaders 是活动/领取这一族的请求头：设备身份和指纹跟模型请求完全一致，
+// 只把客户端版本换成一个新的。上游的活动按版本下发——报 3.16.3 时
+// marketing/touch 回空、领取回 1004；报 3.17.1 才有横幅、领取才 200。
+// 而模型请求用 3.17.1 会被判 3012，所以两边必须用不同的版本号。
+func (s *Server) claimHeaders(acc *Account) map[string]string {
+	h := s.profileHeaders(acc)
+	if claimAppVersion != "" && claimAppVersion != appVersion {
+		h["User-Agent"] = "ZCode/" + claimAppVersion
+		h["X-ZCode-App-Version"] = claimAppVersion
+	}
+	return h
+}
+
 func ensureProfileColumns(db *DB) error {
 	// account_profiles is created in OpenDB. This function is the migration
 	// hook for future columns; keep it additive and idempotent.

@@ -70,8 +70,10 @@ type ClaimResult struct {
 	NextAt         int64         `json:"nextAt,omitempty"` // 名额恢复时间（unix 秒），1005 时上游会给
 }
 
+// activityHeaders 用 claimHeaders：设备指纹不变，客户端版本换成新的
+// （活动按版本下发，见 runtime.go 里 claimAppVersion 的说明）。
 func (s *Server) activityHeaders(acc *Account) map[string]string {
-	return s.profileHeaders(acc)
+	return s.claimHeaders(acc)
 }
 
 func jwtUserID(acc *Account) string {
@@ -120,7 +122,7 @@ func (s *Server) reportActivation(ctx context.Context, acc *Account) []string {
 			"event_extra_detail": map[string]any{},
 			"user_id":            userID,
 			"screen_resolution":  p.Screen,
-			"app_version":        appVersion,
+			"app_version":        claimAppVersion,
 			"device_os_category": func() string {
 				if p.Platform == "darwin" {
 					return "macos"
@@ -136,9 +138,9 @@ func (s *Server) reportActivation(ctx context.Context, acc *Account) []string {
 			"marketing_params":  "{}",
 		}
 		data, _ := json.Marshal(body)
-		headers := map[string]string{"Content-Type": "application/json", "User-Agent": "ZCode/" + appVersion}
+		headers := map[string]string{"Content-Type": "application/json", "User-Agent": "ZCode/" + claimAppVersion}
 		callCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
-	resp, err := s.claimRequest(callCtx, "POST", zcodeAPIBase+"/api/v1/event/report", headers, data)
+		resp, err := s.claimRequest(callCtx, "POST", zcodeAPIBase+"/api/v1/event/report", headers, data)
 		if err != nil {
 			cancel()
 			warnings = append(warnings, "激活事件: "+err.Error())
@@ -242,7 +244,7 @@ func activityResponseMessage(parsed map[string]any, status int) string {
 
 func (s *Server) currentPlans(ctx context.Context, acc *Account) (map[string]string, error) {
 	parsed, _, err := s.zcodeAPICall(ctx, acc, "GET", "/api/v1/zcode-plan/billing/current", url.Values{
-		"app_version": {appVersion},
+		"app_version": {claimAppVersion},
 	}, nil, nil)
 	if err != nil {
 		return nil, err
@@ -313,7 +315,7 @@ func (s *Server) detectActivities(ctx context.Context, acc *Account) (*ActivityS
 	}
 
 	preview, _, previewErr := s.zcodeAPICall(ctx, acc, "GET", "/api/v1/zcode-plan/billing/preview", url.Values{
-		"app_version": {appVersion},
+		"app_version": {claimAppVersion},
 		"platform":    {platform},
 	}, nil, nil)
 	if previewErr != nil {
@@ -366,12 +368,12 @@ func (s *Server) detectActivities(ctx context.Context, acc *Account) (*ActivityS
 				continue
 			}
 			plan := ActivityPlan{
-				PlanID:      p.PlanID,
-				Name:        p.Name,
-				Priority:    p.Priority,
-				StartsAt:    p.StartsAt,
-				EndsAt:      p.EndsAt,
-				Claimed:     true,
+				PlanID:        p.PlanID,
+				Name:          p.Name,
+				Priority:      p.Priority,
+				StartsAt:      p.StartsAt,
+				EndsAt:        p.EndsAt,
+				Claimed:       true,
 				CurrentStatus: p.Status,
 			}
 			for _, ent := range p.Entitlements {
@@ -412,7 +414,7 @@ func (s *Server) detectActivities(ctx context.Context, acc *Account) (*ActivityS
 	})
 	var captcha *ActivityCaptcha
 	if configs, _, cfgErr := s.zcodeAPICall(ctx, acc, "GET", "/api/v1/client/configs", url.Values{
-		"app_version": {appVersion},
+		"app_version": {claimAppVersion},
 		"platform":    {platform},
 	}, nil, nil); cfgErr == nil {
 		cfg := activityMap(activityMap(configs["data"])["configs"])

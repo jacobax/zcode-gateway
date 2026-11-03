@@ -106,8 +106,9 @@ func claim3012Retries() int {
 //
 // 必须和 claimDoers() 的第一跳一致：阿里云的 captchaVerifyParam 绑 IP，
 // 在 A 网解出来的 token 拿到 B 网去用，上游直接判 3012。
-//   direct / direct_fallback → 领取先走直连，solver 也得直连（返回 ""）
-//   proxy / proxy_fallback   → 领取先走中继，solver 也走中继
+//
+//	direct / direct_fallback → 领取先走直连，solver 也得直连（返回 ""）
+//	proxy / proxy_fallback   → 领取先走中继，solver 也走中继
 func (s *Server) claimSolverProxy() string {
 	if !s.upstream.HasClaimProxy() {
 		return ""
