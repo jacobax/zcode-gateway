@@ -293,4 +293,3 @@ func (t *loginThrottle) reset(ip string) {
 	delete(t.fails, ip)
 	t.mu.Unlock()
 }
-

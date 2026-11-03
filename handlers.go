@@ -77,7 +77,6 @@ func (s *Server) summary(acc *Account) *AccountSummary {
 		User: acc.User, Quota: acc.Quota, LastError: acc.LastError,
 		ExhaustedUntil: acc.ExhaustedUntil, ClaimBlockedUntil: acc.ClaimBlockedUntil,
 		LastUsedAt: acc.LastUsedAt, CreatedAt: acc.CreatedAt, Usage: acc.Usage,
-		HasProject: acc.Project != nil,
 	}
 	if profile := s.store.ProfileOf(acc); profile.DeviceMid != "" {
 		summary.Platform = profile.Platform + "-" + profile.Arch
@@ -385,7 +384,6 @@ func (s *Server) handleAccountByID(w http.ResponseWriter, r *http.Request) {
 			a.ExhaustedUntil = 0
 			a.LastError = ""
 			a.LastErrorAt = 0
-			a.RateLimitStreak = 0
 		}) {
 			writeError(w, 404, "account not found")
 			return
@@ -482,7 +480,6 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			QuotaIntervalSec   *int    `json:"quotaIntervalSec"`
 			DefaultConcurrency *int    `json:"defaultConcurrency"`
 			PromptMode         *string `json:"promptMode"`
-			UAProfile          *string `json:"uaProfile"`
 			AutoUpdate         *bool   `json:"autoUpdate"`
 			EgressMode         *string `json:"egressMode"`
 			EgressRotate       *bool   `json:"egressRotate"`
@@ -514,12 +511,6 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 				switch *body.PromptMode {
 				case "append", "replace":
 					st.PromptMode = *body.PromptMode
-				}
-			}
-			if body.UAProfile != nil {
-				switch *body.UAProfile {
-				case "zcode", "claude-code", "chrome":
-					st.UAProfile = *body.UAProfile
 				}
 			}
 			if body.AutoUpdate != nil {
@@ -860,8 +851,6 @@ func (s *Server) forwardVia(ctx context.Context, acc *Account, body map[string]a
 
 // handleAttempt 处理一次上游响应：200 就地渲染并记账（done=true），
 // 其余情况只做分类，由调用方决定换号、等待还是走兜底出口。
-// handleAttempt 处理一次上游响应：200 就地渲染并记账（done=true），
-// 其余情况只做分类，由调用方决定换号、等待还是走兜底出口。
 //
 // 注意 200 也可能是失败：上游用 200 承载 {"code":1005} 这类业务码，见 business.go。
 func (s *Server) handleAttempt(ctx context.Context, w http.ResponseWriter, r *http.Request, acc *Account, resp *fhttp.Response, opts relayOptions, sessionKey string, reqBytes int, start time.Time) (upstreamVerdict, bool, int, []byte) {
@@ -1075,7 +1064,6 @@ func (s *Server) recordLog(acc *Account, model string, stream bool, status int, 
 			a.LastError = ""
 			a.LastErrorAt = 0
 			a.ExhaustedUntil = 0
-			a.RateLimitStreak = 0
 		})
 	}
 }
@@ -1130,8 +1118,6 @@ func (s *Server) authorized(r *http.Request) bool {
 	return auth == "Bearer "+token || apiKey == token
 }
 
-const rateLimitFreezeAfter = 3
-
 func writeUpstreamError(w http.ResponseWriter, status int, body []byte) {
 	var parsed any
 	if json.Unmarshal(body, &parsed) != nil {
@@ -1144,8 +1130,6 @@ func decodeJSON(r *http.Request, target any) error {
 	return json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(target)
 }
 
-// handleProxies 把面板里的代理池操作转发给本地中继（contrib/relay 的管理口）。
-// 中继只监听回环，网关是它唯一入口，所以鉴权沿用面板登录态。
 // relayRequest 把请求原样转发给本地中继（contrib/relay 的管理口），
 // 中继只监听回环，网关是它唯一入口，所以鉴权沿用面板登录态。
 func (s *Server) relayRequest(w http.ResponseWriter, method, path string, body []byte) {

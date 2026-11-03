@@ -292,8 +292,8 @@ func openAITools(raw any) ([]any, bool) {
 // anthropicToOpenAIResponse 把非流式 Anthropic 响应翻成 chat.completion。
 func anthropicToOpenAIResponse(data []byte, model string) ([]byte, Usage, error) {
 	var payload struct {
-		ID         string `json:"id"`
-		Content    []struct {
+		ID      string `json:"id"`
+		Content []struct {
 			Type  string          `json:"type"`
 			Text  string          `json:"text"`
 			ID    string          `json:"id"`

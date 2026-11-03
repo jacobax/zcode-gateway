@@ -53,7 +53,7 @@ func NewStore(dir string) (*Store, error) {
 	}
 	s := &Store{
 		dir:      dir,
-		settings: Settings{Fingerprint: true, StoreBodies: true, QuotaIntervalSec: 30, DefaultConcurrency: 1, PromptMode: "append", UAProfile: "zcode", ClaimWindow: defaultClaimWindow},
+		settings: Settings{Fingerprint: true, StoreBodies: true, QuotaIntervalSec: 30, DefaultConcurrency: 1, PromptMode: "append", ClaimWindow: defaultClaimWindow},
 	}
 	if err := s.loadMasterKey(); err != nil {
 		return nil, err
@@ -211,9 +211,6 @@ func (s *Store) load() error {
 	if file.Settings.PromptMode == "" {
 		file.Settings.PromptMode = "append"
 	}
-	if file.Settings.UAProfile == "" {
-		file.Settings.UAProfile = "zcode"
-	}
 	if !file.Settings.FingerprintSet {
 		// Older files predate the field; fingerprinting is the safe default.
 		file.Settings.Fingerprint = true
@@ -368,20 +365,6 @@ func (s *Store) normalizePrioritiesLocked() {
 	}
 }
 
-func (s *Store) PickAccount(now time.Time) *Account {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sorted := s.sortedLocked()
-	for _, acc := range sorted {
-		if acc.Available(now) {
-			s.settings.ActiveAccountID = acc.ID
-			copy := *acc
-			return &copy
-		}
-	}
-	return nil
-}
-
 func (s *Store) SetActive(id string) {
 	s.mu.Lock()
 	s.settings.ActiveAccountID = id
@@ -490,13 +473,18 @@ func (s *Store) NoteFailure(id, reason string) {
 	s.mu.Unlock()
 }
 
+// UpdateAccount applies fn to the account and persists the result. The bool
+// reports whether the account exists; a failed write is logged instead of
+// being returned, so a disk error never reads as "account not found".
 func (s *Store) UpdateAccount(id string, fn func(*Account)) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, acc := range s.accounts {
 		if acc.ID == id {
 			fn(acc)
-			_ = s.saveLocked()
+			if err := s.saveLocked(); err != nil {
+				log.Printf("保存账号 %s 失败：%v（内存已更新，落盘未生效）", id, err)
+			}
 			return true
 		}
 	}
@@ -565,6 +553,7 @@ func (s *Store) DeleteAccount(id string) {
 		s.db.DeleteAccountProfile(id)
 		s.db.UnbindAccount(id)
 	}
+	s.ResetAccountModelStates(id)
 	_ = s.saveLocked()
 }
 
@@ -808,9 +797,6 @@ func (s *Store) ImportDesktop() error {
 		return os.ErrNotExist
 	}
 	raw, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
 	if err != nil {
 		return err
 	}

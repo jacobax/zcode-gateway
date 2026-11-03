@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -13,6 +15,23 @@ import (
 )
 
 func main() {
+	// 参数先处理：`zcode-gateway --version` 曾经被当成正常启动，在默认端口上
+	// 留下一个跑了几天的幽灵实例。未知参数一律拒绝启动，别让打错的 flag
+	// 悄悄变成一个服务。
+	for _, arg := range os.Args[1:] {
+		switch arg {
+		case "-v", "-version", "--version", "version":
+			fmt.Printf("zcode-gateway %s (client %s, claim %s)\n", buildVersion, appVersion, claimAppVersion())
+			return
+		case "-h", "-help", "--help", "help":
+			printUsage(os.Stdout)
+			return
+		default:
+			fmt.Fprintf(os.Stderr, "未知参数 %q\n\n", arg)
+			printUsage(os.Stderr)
+			os.Exit(2)
+		}
+	}
 	addr := envOr("ZCODE_GATEWAY_ADDR", "127.0.0.1:8787")
 	dataDir := envOr("ZCODE_GATEWAY_DATA", "data")
 	baseURL := envOr("ZCODE_GATEWAY_BASE_URL", "http://"+addr)
@@ -150,4 +169,17 @@ func logRequests(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// printUsage 只描述启动方式和版本，配置项一律走环境变量（见 README.md）。
+func printUsage(w io.Writer) {
+	fmt.Fprintf(w, `zcode-gateway %s（模拟 ZCode 客户端 %s）
+
+用法：
+  zcode-gateway             启动网关（默认 127.0.0.1:8787，数据目录 ./data）
+  zcode-gateway --version   打印版本后退出
+  zcode-gateway --help      打印本帮助后退出
+
+配置全部通过环境变量，见 README.md 与 OPERATIONS.md。
+`, buildVersion, appVersion)
 }

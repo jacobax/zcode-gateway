@@ -963,10 +963,8 @@ async function loadSettings() {
     $('setting-bodies').checked = !!data.settings.storeBodies;
     $('setting-fingerprint').checked = !!data.settings.fingerprint;
     $('setting-prompt-mode').value = data.settings.promptMode || 'replace';
-    $('setting-ua').value = data.settings.uaProfile || 'zcode';
     $('setting-quota').value = data.settings.quotaIntervalSec || 30;
     $('setting-base').textContent = data.server.baseUrl;
-    $('setting-version').textContent = `v${data.server.version}`;
     $('setting-version').textContent = data.server.buildVersion ? `v${data.server.buildVersion}` : '开发构建';
     if ($('build-version')) $('build-version').textContent = data.server.buildVersion ? `v${data.server.buildVersion}` : '开发构建';
     if ($('client-version')) $('client-version').textContent = `ZCode ${data.server.version}`;

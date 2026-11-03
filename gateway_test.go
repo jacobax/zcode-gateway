@@ -13,45 +13,6 @@ import (
 	"time"
 )
 
-func TestPickAccountRotatesOnExhaustion(t *testing.T) {
-	dir, err := os.MkdirTemp("", "zcg-rate-test-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	store, err := NewStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = store.Close()
-		_ = os.RemoveAll(dir)
-	})
-	store.accounts = nil
-	store.settings.ActiveAccountID = ""
-	a1 := &Account{ID: "a1", Label: "first", Priority: 1, Enabled: true, CreatedAt: 1, Models: map[string]*UsageTotals{}}
-	a2 := &Account{ID: "a2", Label: "second", Priority: 2, Enabled: true, CreatedAt: 2, Models: map[string]*UsageTotals{}}
-	if err := store.AddAccount(a1); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.AddAccount(a2); err != nil {
-		t.Fatal(err)
-	}
-	if got := store.PickAccount(time.Now()); got == nil || got.ID != "a1" {
-		t.Fatalf("expected first account, got %#v", got)
-	}
-	store.MarkExhausted("a1", time.Now().Add(time.Hour), "quota")
-	if got := store.PickAccount(time.Now()); got == nil || got.ID != "a2" {
-		t.Fatalf("expected fallback account, got %#v", got)
-	}
-	store.UpdateAccount("a1", func(a *Account) {
-		a.ExhaustedUntil = 0
-		a.LastError = ""
-	})
-	if got := store.PickAccount(time.Now()); got == nil || got.ID != "a1" {
-		t.Fatalf("expected recovery to first account, got %#v", got)
-	}
-}
-
 func TestSystemFingerprintInjection(t *testing.T) {
 	blocks := withSystemFingerprint(nil)
 	if len(blocks) != 2 || blockText(blocks[0]) != SystemHead || blockText(blocks[1]) != SystemPrefix {
@@ -104,11 +65,11 @@ func TestClassifyUpstream(t *testing.T) {
 		return h
 	}
 	cases := []struct {
-		name    string
-		status  int
-		header  http.Header
-		body    string
-		check   func(t *testing.T, v upstreamVerdict)
+		name   string
+		status int
+		header http.Header
+		body   string
+		check  func(t *testing.T, v upstreamVerdict)
 	}{
 		{
 			name: "429 原地等 Retry-After，不冷却账号", status: 429,
@@ -279,9 +240,6 @@ func TestClassifyUpstream(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.check(t, classifyUpstream(tc.status, tc.header, []byte(tc.body)))
 		})
-	}
-	if rateLimitFreezeAfter != 3 {
-		t.Fatalf("rate limit threshold changed: %d", rateLimitFreezeAfter)
 	}
 }
 

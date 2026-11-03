@@ -356,15 +356,6 @@
             <small>append 保留客户端 system 策略；replace 完全不发送客户端 system，伪装更强。</small>
           </label>
           <label class="field">
-            <span>UA / 身份指纹</span>
-            <select class="input" id="setting-ua">
-              <option value="zcode">ZCode 官方（推荐）</option>
-              <option value="chrome">Chrome 浏览器</option>
-              <option value="claude-code">Claude Code</option>
-            </select>
-            <small>同时覆盖 User-Agent、X-Title、X-ZCode-* 等身份头，并丢弃客户端 anthropic-beta。</small>
-          </label>
-          <label class="field">
             <span>额度刷新间隔（秒）</span>
             <input class="input" id="setting-quota" type="number" min="10" max="300" step="5">
             <small>后台定时拉取套餐额度，页面每 30 秒读取一次。</small>

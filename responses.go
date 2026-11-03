@@ -456,7 +456,6 @@ func (s *responsesStream) closeText() {
 	s.event("response.output_item.done", map[string]any{"output_index": s.textIndex, "item": item})
 	s.output = append(s.output, item)
 	s.textBuf.Reset()
-	s.textBuf.Reset()
 }
 
 func (s *responsesStream) openTool(id, name string) {

@@ -541,8 +541,6 @@ func firstUserText(messages any) string {
 	return ""
 }
 
-// textOfContent 把 string 或 content block 数组拍平成文本。
-
 // promptCacheKeyFor 给上游一个稳定的前缀缓存路由键。
 //
 // 实测依据（KeyPort 的注释）：同一段 8k token 前缀，不带 key 时
@@ -565,6 +563,8 @@ func promptCacheKeyFor(acc *Account, sessionKey string) string {
 	sum := sha256.Sum256([]byte(uid + "|" + sessionKey))
 	return "zcg-" + hex.EncodeToString(sum[:8])
 }
+
+// textOfContent 把 string 或 content block 数组拍平成文本。
 func textOfContent(value any) string {
 	switch v := value.(type) {
 	case string:

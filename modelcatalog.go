@@ -55,7 +55,6 @@ type catalogModel struct {
 var (
 	catalogMu         sync.RWMutex
 	catalogModels     = map[string]*catalogModel{}
-	catalogDefault    = ""
 	catalogFetchedAt  time.Time
 	catalogNextAt     time.Time
 	catalogLastErr    string
@@ -154,7 +153,7 @@ func (s *Server) ensureModelCatalog(acc *Account) {
 		}()
 		ctx, cancel := context.WithTimeout(context.Background(), catalogTimeout)
 		defer cancel()
-		models, def, err := s.fetchModelCatalog(ctx, acc)
+		models, _, err := s.fetchModelCatalog(ctx, acc)
 		catalogMu.Lock()
 		defer catalogMu.Unlock()
 		if err != nil {
@@ -164,7 +163,6 @@ func (s *Server) ensureModelCatalog(acc *Account) {
 		}
 		if len(models) > 0 {
 			catalogModels = models
-			catalogDefault = def
 			catalogFetchedAt = time.Now()
 		}
 		catalogLastErr = ""

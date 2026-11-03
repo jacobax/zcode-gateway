@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 
 	_ "modernc.org/sqlite"
@@ -240,7 +241,7 @@ func (d *DB) Logs(limit int, status, accountID string) ([]*LogEntry, error) {
 		args = append(args, accountID)
 	}
 	if len(where) > 0 {
-		query += " WHERE " + joinAnd(where)
+		query += " WHERE " + strings.Join(where, " AND ")
 	}
 	query += " ORDER BY time DESC LIMIT ?"
 	args = append(args, limit)
@@ -479,15 +480,4 @@ func scanLog(row rowScanner) (*LogEntry, error) {
 	e.RequestBody = body.String
 	e.ResponseBody = respBody.String
 	return &e, nil
-}
-
-func joinAnd(parts []string) string {
-	out := ""
-	for i, part := range parts {
-		if i > 0 {
-			out += " AND "
-		}
-		out += part
-	}
-	return out
 }

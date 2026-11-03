@@ -26,8 +26,21 @@ jobs:
           cache: true
       - name: go vet
         run: go vet ./...
+      - name: gofmt
+        run: |
+          set -euo pipefail
+          # 格式闸门：auth.go / gateway_test.go / openai.go / portable.go 之前
+          # 一直没跑过 gofmt，改动里混着无关的空行与对齐噪音。
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "!! 以下文件没格式化，请跑 gofmt -w："
+            printf '%s\n' "$unformatted"
+            exit 1
+          fi
       - name: go test
         run: go test ./...
+      - name: go test -race
+        run: go test -race ./...
       - name: go build
         run: go build -trimpath -ldflags="-s -w" -o /tmp/zcode-gateway .
       - name: 检查前端资源

@@ -3,7 +3,6 @@ package main
 import (
 	"database/sql"
 	"math/rand/v2"
-	"strings"
 	"time"
 )
 
@@ -291,15 +290,6 @@ func (s *Store) SetConcurrency(accountID string, n int) bool {
 	return ok
 }
 
-func (s *Store) SetActivationDate(accountID, date string) {
-	s.UpdateAccountMemory(accountID, func(a *Account) {
-		a.LastActivationDate = date
-		if a.Profile != nil {
-			_ = s.saveProfile(accountID, *a.Profile, a.Concurrency, date)
-		}
-	})
-}
-
 func osCategoryFor(platform string) string {
 	switch platform {
 	case "darwin", "macos":
@@ -396,5 +386,3 @@ func normalizeConcurrency(n int) int {
 	}
 	return clampConcurrency(n)
 }
-
-var _ = strings.TrimSpace

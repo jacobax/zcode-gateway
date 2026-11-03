@@ -117,7 +117,6 @@ type Account struct {
 	ExhaustedUntil     int64                   `json:"exhaustedUntil,omitempty"`
 	LastError          string                  `json:"lastError,omitempty"`
 	LastErrorAt        int64                   `json:"lastErrorAt,omitempty"`
-	RateLimitStreak    int                     `json:"rateLimitStreak,omitempty"`
 	RiskStrikes        int                     `json:"riskStrikes,omitempty"`
 	ClaimBlockedUntil  int64                   `json:"claimBlockedUntil,omitempty"`
 	DeviceMid          string                  `json:"-"`
@@ -136,10 +135,6 @@ type Account struct {
 	AccessToken     string `json:"-"`
 	ProjectToken    string `json:"-"`
 	ProjectTokenExp int64  `json:"-"`
-}
-
-func (a *Account) Available(now time.Time) bool {
-	return a.Enabled && a.ExhaustedUntil <= now.Unix()
 }
 
 func (a *Account) AddUsage(model string, u Usage) {
@@ -188,7 +183,6 @@ type Settings struct {
 	Fingerprint        bool   `json:"fingerprint"`
 	FingerprintSet     bool   `json:"fingerprintSet,omitempty"`
 	PromptMode         string `json:"promptMode"`
-	UAProfile          string `json:"uaProfile"`
 	StoreBodies        bool   `json:"storeBodies"`
 	QuotaIntervalSec   int    `json:"quotaIntervalSec"`
 	DefaultConcurrency int    `json:"defaultConcurrency"` // 全局默认单账号并发；账号自己设了就覆盖
@@ -304,7 +298,6 @@ type AccountSummary struct {
 	CreatedAt            int64        `json:"createdAt"`
 	Usage                UsageTotals  `json:"usage"`
 	Today                TodayStats   `json:"today"`
-	HasProject           bool         `json:"hasProject"`
 	Platform             string       `json:"platform,omitempty"`
 	OSVersion            string       `json:"osVersion,omitempty"`
 	Screen               string       `json:"screen,omitempty"`
