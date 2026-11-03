@@ -293,6 +293,18 @@ TLS）→ CONNECT → 对目标再做一次 TLS → 发 `GET /api/v1/client/conf
     但上游对未知顶层字段的容忍度没实测过，贸然加一旦被拒就是全站 400。
     构造里掺了账号 uid，防止跨账号命中别人的前缀缓存。
 
+18. **禁用的号不会被定时刷新**。`refreshAllQuotas` 原来只刷 `enabled` 的号，而
+    `api-pending` 的号正是禁用的——「额度没到账 → 禁用 → 不刷新 → 永远发现不了
+    到账」死锁。claimer 侧有兜底（判断前先 `POST /api/accounts/{id}/refresh`），
+    所以线上没炸；面板和直接调 API 的用户会一直卡在「待生效」。现在禁用的号只要
+    `source=api-pending` 就继续刷，真正停用的（401 / 手动禁用）不刷。
+    11-03 实测：23:04 那轮 claimer 逐个刷新后确认 40 个号各 3 亿到账，全部自动启用。
+
+19. **`/v1/responses` 必须处理 thinking block**。GLM 先发 thinking 再发 text，
+    只处理 text 会让「思考把 max_output_tokens 吃满」的回合返回空 output——
+    客户端以为模型没回话。现在 thinking 转成 Responses 的 reasoning item。
+    实测 32 token 时确实空，400 token 才正常。
+
 ## 出口 IP 与风控
 
 上游的 `3012 账号或者网络环境存在异常` 是按**出口 IP** 判的：同一个 IP 连续领取多个账号，
