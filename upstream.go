@@ -244,6 +244,9 @@ func (s *Server) forward(ctx context.Context, acc *Account, body map[string]any,
 		payload["model"] = "GLM-5.3-Flash"
 	}
 	sanitizeForUpstream(payload)
+	// 模型清单：拉得到就钳 max_tokens、把 thinking_level 翻成上游认的路径。
+	s.ensureModelCatalog(acc)
+	applyModelCatalog(payload)
 	if s.store.Settings().Fingerprint && os.Getenv("ZCODE_SYSTEM_FINGERPRINT") != "0" {
 		mode := s.store.Settings().PromptMode
 		if mode == "replace" {

@@ -29,7 +29,7 @@
 | `POST /v1/messages` | Anthropic Messages | Claude Code、ZCode 桌面端 |
 | `POST /v1/chat/completions` | OpenAI Chat Completions | OpenAI SDK、Cursor、各类兼容工具 |
 | `POST /v1/responses` | OpenAI Responses | Codex CLI 及只认 Responses 形状的客户端 |
-| `GET /v1/models` | 模型列表 | — |
+| `GET /v1/models` | 模型列表（跟随上游 `client/configs`，带 `context_window` / `max_output_tokens`） | — |
 | `GET /health` | 存活探测（含账号数、在途请求、构建版本、活动客户端版本） | systemd / 监控 |
 | `GET /metrics` | Prometheus 指标（账号池状态、额度、按模型用量） | Prometheus / Grafana |
 
@@ -53,6 +53,29 @@ curl -s http://127.0.0.1:8787/v1/responses \
 ```
 
 面板「设置 → 客户端接入指引」会按当前 Base URL / Token 生成可直接复制的示例。
+
+## 模型与思考强度
+
+`GET /v1/models` 的清单来自上游 `client/configs`（缓存 1 小时），不再硬编码。
+拉不到时回落到内置的 `GLM-5.3` / `GLM-5.3-Flash`，不影响服务。
+
+**`max_tokens` 自动钳制**：超过模型的 `maxCompletionTokens`（实测 128000）时
+钳到上限，而不是让上游回 `1210 max_tokens 非法`。
+
+**思考强度**用 `thinking_level` 控制，三档 `low` / `high` / `max`（默认 `max`）：
+
+```bash
+curl -s http://127.0.0.1:8787/v1/messages \
+  -H "x-api-key: <token>" -H "content-type: application/json" \
+  -d '{"model":"GLM-5.3-Flash","max_tokens":2000,"thinking_level":"low",
+       "messages":[{"role":"user","content":"..."}]}'
+```
+
+实测同一道题：`low` 思考 12 字符 / 243 输出 token，`high` 20 / 267，
+`max` 690 / 514。网关把它翻译成上游的 `output_config.effort`，路径来自
+`client/configs` 的 `reasoning.levels`——上游改结构时跟着变。
+
+客户端自己带了 `output_config` 时网关不覆盖。
 
 ## 监控
 

@@ -76,7 +76,7 @@ func (s *Server) summary(acc *Account) *AccountSummary {
 		Concurrency: normalizeConcurrency(acc.Concurrency), ConcurrencyEffective: s.store.EffectiveConcurrency(acc),
 		User: acc.User, Quota: acc.Quota, LastError: acc.LastError,
 		ExhaustedUntil: acc.ExhaustedUntil, ClaimBlockedUntil: acc.ClaimBlockedUntil,
-		LastUsedAt:     acc.LastUsedAt, CreatedAt: acc.CreatedAt, Usage: acc.Usage,
+		LastUsedAt: acc.LastUsedAt, CreatedAt: acc.CreatedAt, Usage: acc.Usage,
 		HasProject: acc.Project != nil,
 	}
 	if profile := s.store.ProfileOf(acc); profile.DeviceMid != "" {
@@ -453,7 +453,6 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"items": s.store.Logs(limit, status, accountID)})
 }
 
-
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -463,13 +462,13 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		// 明文 token 只在 /api/settings/token 单独回显，页面平时拿掩码。
 		settings.ProxyToken = ""
 		writeJSON(w, 200, map[string]any{
-			"settings":       settings,
-			"passwordSource": s.passwordSource(),
-			"proxyTokenMask": maskToken(real),
-			"proxyTokenSet":   real != "",
+			"settings":         settings,
+			"passwordSource":   s.passwordSource(),
+			"proxyTokenMask":   maskToken(real),
+			"proxyTokenSet":    real != "",
 			"egressAvailable":  s.upstream.HasEgress(),
 			"claimSolverReady": captchaSolverDir() != "",
-			"egressProxy":     proxyDisplay(s.upstream.EgressProxyURL()),
+			"egressProxy":      proxyDisplay(s.upstream.EgressProxyURL()),
 			"server": ServerInfo{
 				Version: s.version, BuildVersion: buildVersion, BaseURL: s.baseURL, Fingerprint: settings.Fingerprint,
 				QuotaSeconds: settings.QuotaIntervalSec, DataDir: s.store.dir,
@@ -580,9 +579,19 @@ func maskToken(token string) string {
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
-	models := []map[string]any{
-		{"id": "GLM-5.3-Flash", "object": "model", "created": s.start.Unix(), "owned_by": "zcode"},
-		{"id": "GLM-5.3", "object": "model", "created": s.start.Unix(), "owned_by": "zcode"},
+	catalog := modelCatalog()
+	models := make([]map[string]any, 0, len(catalog))
+	for _, m := range catalog {
+		entry := map[string]any{
+			"id": m.ID, "object": "model", "created": s.start.Unix(), "owned_by": "zcode",
+		}
+		if m.ContextWindow > 0 {
+			entry["context_window"] = m.ContextWindow
+		}
+		if m.MaxOutput > 0 {
+			entry["max_output_tokens"] = m.MaxOutput
+		}
+		models = append(models, entry)
 	}
 	writeJSON(w, 200, map[string]any{"object": "list", "data": models})
 }
@@ -596,7 +605,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		// 活动/领取上报的客户端版本，见 claimversion.go。放这里是为了排查
 		// 「明明有活动却看不到横幅」时能一眼确认当前用的是哪个版本、从哪来的。
 		"claimVersion": claimVersionStatus(),
-		"endpointMap": endpointMapStatus(),
+		"modelCatalog": catalogStatus(),
+		"endpointMap":  endpointMapStatus(),
 	})
 }
 
@@ -678,6 +688,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		writeUpstream: writeUpstreamError,
 	})
 }
+
 // handleChatCompletions 是 OpenAI 兼容入口：请求翻成 Anthropic 再走上游，
 // 响应再翻回 chat.completion。这样 Cursor / OpenAI SDK 这类客户端也能直接用。
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
@@ -729,7 +740,6 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeUpstream: writeOpenAIUpstreamError,
 	})
 }
-
 
 func (s *Server) relay(w http.ResponseWriter, r *http.Request, opts relayOptions) {
 	start := time.Now()
@@ -894,7 +904,6 @@ func (s *Server) rotateEgress(ctx context.Context) {
 	_, _ = io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 }
-
 
 // applyVerdict 把分类结论落到账号状态上：能修的修，修不了才冷却或停用。
 func (s *Server) applyVerdict(acc *Account, v upstreamVerdict, model string) {

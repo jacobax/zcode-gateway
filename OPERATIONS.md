@@ -172,6 +172,39 @@ start-plan 不走这套：它不在客户端配置里，上游也不会给它下
 
 只校验客户端**显式传**的 model；不传时用默认值 `GLM-5.3-Flash`，不走白名单。
 
+## 模型清单与思考强度
+
+`GET /api/v1/client/configs` 下发 `builtinModels`（实测 2026-11-03：`GLM-5.3` 和
+`GLM-5.3-Flash`，各 1M 上下文 / 128K 输出上限）和 `reasoning.levels`：
+
+````json
+{"modelId":"GLM-5.3","contextWindow":1000000,"maxCompletionTokens":128000,
+ "reasoning":{"defaultLevel":"max","levels":{
+   "low":{"anthropic":{"set":[{"path":["output_config","effort"],"value":"low"}]}},
+   "high":{...},"max":{...}}}}
+````
+
+`modelcatalog.go` 缓存它（TTL 1 小时、失败 5 分钟重试），三个用途：
+
+1. `GET /v1/models` 不再硬编码，跟着上游走，并带上 `context_window` / `max_output_tokens`
+2. `max_tokens` 超过模型上限时钳到上限——上游对超限回 `1210`
+3. `thinking_level` 翻译成 `output_config.effort`
+
+**刻意不做**：不用 `builtinModels` 自动生成白名单。它只有 2 个内置模型，而
+`providers[].models` 里还有 `GLM-5.2` / `GLM-5-Turbo`——拿内置清单当白名单会把
+合法请求误杀。白名单仍靠 `ZCODE_MODEL_ALLOWLIST` 手工配。
+
+思考档位实测（同一道行程题，`max_tokens` 2000）：
+
+| `thinking_level` | thinking 字符 | 输出 token |
+|---|---|---|
+| `low` | 12 | 243 |
+| `high` | 20 | 267 |
+| `max`（默认） | 690 | 514 |
+
+`output_config.effort` 直接写进请求体也能生效（`sanitizeForUpstream` 不删它）；
+客户端自己带了 `output_config` 时网关不覆盖。
+
 ## 领取退避
 
 `1005 名额用完` 的上游回执带 `next_at` 时，网关把它记进账号的 `claimBlockedUntil`，
