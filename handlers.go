@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	fhttp "github.com/bogdanfinn/fhttp"
@@ -766,7 +767,7 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request, opts relayOptions
 			defer cancel()
 
 			viaEgress := egressMode == "always"
-			resp, reqBytes, err := s.forwardVia(ctx, acc, opts.body, clientHeaders, viaEgress)
+			resp, reqBytes, err := s.forwardVia(ctx, acc, opts.body, clientHeaders, viaEgress, sessionKey)
 			if err != nil {
 				lastErr = err
 				if r.Context().Err() == nil {
@@ -786,7 +787,7 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request, opts relayOptions
 				if rotateEgress {
 					s.rotateEgress(ctx)
 				}
-				resp2, reqBytes2, err2 := s.ForwardViaEgress(ctx, acc, opts.body, clientHeaders)
+				resp2, reqBytes2, err2 := s.ForwardViaEgress(ctx, acc, opts.body, clientHeaders, sessionKey)
 				if err2 != nil {
 					s.applyVerdict(acc, verdict, opts.model)
 					return
@@ -831,17 +832,27 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request, opts relayOptions
 	opts.writeUpstream(w, lastStatus, lastBody)
 }
 
-func (s *Server) forwardVia(ctx context.Context, acc *Account, body map[string]any, clientHeaders map[string]string, viaEgress bool) (*fhttp.Response, []byte, error) {
+func (s *Server) forwardVia(ctx context.Context, acc *Account, body map[string]any, clientHeaders map[string]string, viaEgress bool, sessionKey string) (*fhttp.Response, []byte, error) {
 	if viaEgress {
-		return s.ForwardViaEgress(ctx, acc, body, clientHeaders)
+		return s.ForwardViaEgress(ctx, acc, body, clientHeaders, sessionKey)
 	}
-	return s.Forward(ctx, acc, body, clientHeaders)
+	return s.Forward(ctx, acc, body, clientHeaders, sessionKey)
 }
 
 // handleAttempt 处理一次上游响应：200 就地渲染并记账（done=true），
 // 其余情况只做分类，由调用方决定换号、等待还是走兜底出口。
+// handleAttempt 处理一次上游响应：200 就地渲染并记账（done=true），
+// 其余情况只做分类，由调用方决定换号、等待还是走兜底出口。
+//
+// 注意 200 也可能是失败：上游用 200 承载 {"code":1005} 这类业务码，见 business.go。
 func (s *Server) handleAttempt(ctx context.Context, w http.ResponseWriter, r *http.Request, acc *Account, resp *fhttp.Response, opts relayOptions, sessionKey string, reqBytes int, start time.Time) (upstreamVerdict, bool, int, []byte) {
 	if resp.StatusCode == 200 {
+		if verdict, peeked, ok := peekBusinessError(resp); ok {
+			resp.Body.Close()
+			s.recordLog(acc, opts.model, opts.stream, 200, false, time.Since(start), Usage{}, streamTiming{}, resp.Header.Get("x-request-id"), sessionKey, r, opts.clientReqBody, truncate(string(peeked), 8192), reqBytes, len(peeked), verdict.Reason)
+			// 不当成功：不 TouchSession、不 ResetRiskStrikes，交给调用方换号。
+			return verdict, false, 200, peeked
+		}
 		usage, timing, respBytes, respPreview := opts.render(ctx, w, resp, start)
 		s.recordLog(acc, opts.model, opts.stream, 200, true, time.Since(start), usage, timing, resp.Header.Get("x-request-id"), sessionKey, r, opts.clientReqBody, respPreview, reqBytes, respBytes, "")
 		s.pool.TouchSession(sessionKey)
@@ -850,7 +861,7 @@ func (s *Server) handleAttempt(ctx context.Context, w http.ResponseWriter, r *ht
 	}
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	resp.Body.Close()
-	verdict := classifyUpstream(resp.StatusCode, resp.Header.Get("Retry-After"), data)
+	verdict := classifyUpstream(resp.StatusCode, resp.Header, data)
 	if verdict.Retry {
 		return verdict, false, resp.StatusCode, data
 	}
@@ -956,6 +967,30 @@ func (s *Server) writeUpstream(ctx context.Context, w http.ResponseWriter, resp 
 	var preview strings.Builder
 	var timing streamTiming
 	var firstTokenAt, lastTokenAt time.Time
+	// 首字 / 流空闲超时。整轮 requestTimeout（默认 600s）管不住「上游接了请求
+	// 但一直不出字」和「出到一半卡住」这两种情况——客户端会干等十分钟。
+	// 超时直接关掉上游 body，让阻塞中的 ReadString 返回错误退出。
+	firstTimeout := envSecondsAllowZero("ZCODE_FIRST_TOKEN_TIMEOUT_SEC", 180)
+	idleTimeout := envSecondsAllowZero("ZCODE_STREAM_IDLE_TIMEOUT_SEC", 120)
+	var firstAt atomic.Int64 // UnixNano，0 = 还没出字
+	var timedOut atomic.Bool
+	closeForTimeout := func() {
+		timedOut.Store(true)
+		_ = resp.Body.Close()
+	}
+	if firstTimeout > 0 {
+		timer := time.AfterFunc(firstTimeout, func() {
+			if firstAt.Load() == 0 {
+				closeForTimeout()
+			}
+		})
+		defer timer.Stop()
+	}
+	var idleTimer *time.Timer
+	if idleTimeout > 0 {
+		idleTimer = time.AfterFunc(idleTimeout, closeForTimeout)
+		defer idleTimer.Stop()
+	}
 	for {
 		if ctx.Err() != nil {
 			break
@@ -970,8 +1005,12 @@ func (s *Server) writeUpstream(ctx context.Context, w http.ResponseWriter, resp 
 				now := time.Now()
 				if firstTokenAt.IsZero() {
 					firstTokenAt = now
+					firstAt.Store(now.UnixNano())
 				}
 				lastTokenAt = now
+				if idleTimer != nil {
+					idleTimer.Reset(idleTimeout)
+				}
 			}
 			if _, werr := io.WriteString(w, line); werr != nil {
 				break
@@ -983,6 +1022,10 @@ func (s *Server) writeUpstream(ctx context.Context, w http.ResponseWriter, resp 
 		if err != nil {
 			break
 		}
+	}
+	if timedOut.Load() {
+		log.Printf("stream timeout: first=%s idle=%s bytes=%d firstToken=%v",
+			firstTimeout, idleTimeout, total, !firstTokenAt.IsZero())
 	}
 	if !firstTokenAt.IsZero() {
 		timing.firstTokenMs = firstTokenAt.Sub(start).Milliseconds()

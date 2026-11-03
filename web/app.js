@@ -1176,11 +1176,23 @@ async function changePassword() {
 // renderGuide 把当前 Base URL 与 Token 填进接入示例，避免用户对着占位符猜。
 function renderGuide(base, token) {
   const auth = token || '<本机免鉴权>';
-  const snippets = `# curl
+  const snippets = `# Anthropic Messages
 curl -s ${base}/v1/messages \\
   -H "Authorization: Bearer ${auth}" \\
   -H "content-type: application/json" \\
   -d '{"model":"GLM-5.3","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}'
+
+# OpenAI Chat Completions
+curl -s ${base}/v1/chat/completions \\
+  -H "Authorization: Bearer ${auth}" \\
+  -H "content-type: application/json" \\
+  -d '{"model":"GLM-5.3","messages":[{"role":"user","content":"hi"}]}'
+
+# OpenAI Responses（Codex CLI 走这条）
+curl -s ${base}/v1/responses \\
+  -H "Authorization: Bearer ${auth}" \\
+  -H "content-type: application/json" \\
+  -d '{"model":"GLM-5.3","input":"hi","max_output_tokens":64}'
 
 # Claude Code / ZCode 客户端
 export ANTHROPIC_BASE_URL=${base}

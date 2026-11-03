@@ -60,6 +60,7 @@ func main() {
 	mux.HandleFunc("/api/proxies", server.requireAdmin(server.handleProxies))
 	mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
 	mux.HandleFunc("/v1/messages", server.handleMessages)
+	mux.HandleFunc("/v1/responses", server.handleResponses)
 	mux.HandleFunc("/v1/models", server.handleModels)
 	mux.HandleFunc("/health", server.handleHealth)
 	mux.Handle("/", server.webHandler())

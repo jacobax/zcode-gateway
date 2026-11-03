@@ -150,7 +150,7 @@ func TestOpenAIStreamTranslation(t *testing.T) {
 	stream := newOpenAIStream(rec, "GLM-5.3")
 	lines := []string{
 		`event: message_start`,
-		`data: {"type":"message_start","usage":{"input_tokens":9}}`,
+		`data: {"type":"message_start","message":{"usage":{"input_tokens":9}}}`,
 		`data: {"type":"content_block_start","content_block":{"type":"text"}}`,
 		`data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"你"}}`,
 		`data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"好"}}`,

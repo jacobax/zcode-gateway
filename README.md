@@ -28,11 +28,28 @@
 |---|---|---|
 | `POST /v1/messages` | Anthropic Messages | Claude Code、ZCode 桌面端 |
 | `POST /v1/chat/completions` | OpenAI Chat Completions | OpenAI SDK、Cursor、各类兼容工具 |
+| `POST /v1/responses` | OpenAI Responses | Codex CLI 及只认 Responses 形状的客户端 |
 | `GET /v1/models` | 模型列表 | — |
-| `GET /health` | 存活探测（含账号数、在途请求、构建版本） | systemd / 监控 |
+| `GET /health` | 存活探测（含账号数、在途请求、构建版本、活动客户端版本） | systemd / 监控 |
 
-鉴权：面板里设了「代理 Token」后，两个入口都要带 `Authorization: Bearer <token>`
+鉴权：面板里设了「代理 Token」后，三个入口都要带 `Authorization: Bearer <token>`
 或 `x-api-key: <token>`；留空表示本机免鉴权（只建议在回环地址上这么做）。
+
+```bash
+# Anthropic 风格
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8787
+export ANTHROPIC_AUTH_TOKEN=<token>
+
+# OpenAI 风格
+curl -s http://127.0.0.1:8787/v1/chat/completions \
+  -H "Authorization: Bearer <token>" -H "content-type: application/json" \
+  -d '{"model":"GLM-5.3","messages":[{"role":"user","content":"hi"}]}'
+
+# Responses 风格（Codex CLI 走这条）
+curl -s http://127.0.0.1:8787/v1/responses \
+  -H "Authorization: Bearer <token>" -H "content-type: application/json" \
+  -d '{"model":"GLM-5.3","input":"hi","max_output_tokens":64}'
+```
 
 ```bash
 # Anthropic 风格

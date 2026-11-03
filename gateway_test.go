@@ -96,11 +96,17 @@ func TestParseUsageAndStreamTracker(t *testing.T) {
 }
 
 func TestClassifyUpstream(t *testing.T) {
-	withRetryAfter := func(value string) string { return value }
+	withRetryAfter := func(value string) http.Header {
+		h := http.Header{}
+		if value != "" {
+			h.Set("Retry-After", value)
+		}
+		return h
+	}
 	cases := []struct {
 		name    string
 		status  int
-		header  string
+		header  http.Header
 		body    string
 		check   func(t *testing.T, v upstreamVerdict)
 	}{
@@ -181,6 +187,80 @@ func TestClassifyUpstream(t *testing.T) {
 			check: func(t *testing.T, v upstreamVerdict) {
 				if !v.Retry || v.Cooldown != 0 {
 					t.Fatalf("content policy reject should retry without cooling: %#v", v)
+				}
+			},
+		},
+		{
+			name: "403 带验证码挑战头：不伤账号", status: 403,
+			header: func() http.Header {
+				h := http.Header{}
+				h.Set("X-Aliyun-Captcha-Challenge", "1")
+				return h
+			}(),
+			body: `{"msg":"forbidden"}`,
+			check: func(t *testing.T, v upstreamVerdict) {
+				if !v.Retry || v.Disable || v.Cooldown != 0 {
+					t.Fatalf("403 with captcha challenge must not disable the account: %#v", v)
+				}
+			},
+		},
+		{
+			name: "403 带验证码文案：不伤账号", status: 403,
+			header: withRetryAfter(""),
+			body:   `{"msg":"captcha verify failed"}`,
+			check: func(t *testing.T, v upstreamVerdict) {
+				if !v.Retry || v.Disable {
+					t.Fatalf("403 captcha text must not disable the account: %#v", v)
+				}
+			},
+		},
+		{
+			name: "403 普通认证失败仍然停用", status: 403,
+			header: withRetryAfter(""),
+			body:   `{"msg":"invalid api key"}`,
+			check: func(t *testing.T, v upstreamVerdict) {
+				if !v.Retry || !v.Disable {
+					t.Fatalf("plain 403 should still disable: %#v", v)
+				}
+			},
+		},
+		{
+			name: "1308 额度耗尽：换号 + 模型级，不冷却", status: 400,
+			header: withRetryAfter(""),
+			body:   `{"code":1308,"msg":"usage limit reached"}`,
+			check: func(t *testing.T, v upstreamVerdict) {
+				if !v.Retry || !v.ModelScoped || v.Cooldown != 0 || v.Disable {
+					t.Fatalf("1308 should switch account without cooling: %#v", v)
+				}
+			},
+		},
+		{
+			name: "429 上的 1310 也按额度耗尽处理", status: 429,
+			header: withRetryAfter("30"),
+			body:   `{"code":1310,"msg":"weekly limit"}`,
+			check: func(t *testing.T, v upstreamVerdict) {
+				if !v.Retry || !v.ModelScoped || v.Wait != 0 {
+					t.Fatalf("1310 on 429 should switch account, not wait: %#v", v)
+				}
+			},
+		},
+		{
+			name: "3010 模型并发准入：短退避不冷却", status: 429,
+			header: withRetryAfter("30"),
+			body:   `{"code":3010,"msg":"model admission concurrency limit"}`,
+			check: func(t *testing.T, v upstreamVerdict) {
+				if !v.Retry || !v.ModelScoped || v.Cooldown != 0 || v.Wait != modelBusyRetryAfter {
+					t.Fatalf("3010 should back off briefly: %#v", v)
+				}
+			},
+		},
+		{
+			name: "error.type 里的业务码也要认", status: 400,
+			header: withRetryAfter(""),
+			body:   `{"error":{"type":"1113","message":"no resource pack"}}`,
+			check: func(t *testing.T, v upstreamVerdict) {
+				if !v.Retry || !v.ModelScoped {
+					t.Fatalf("error.type business code must be honoured: %#v", v)
 				}
 			},
 		},

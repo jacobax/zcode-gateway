@@ -441,6 +441,12 @@ func (s *openAIStream) feed(line string) bool {
 			ID   string `json:"id"`
 			Name string `json:"name"`
 		} `json:"content_block"`
+		// message_start 的 usage 嵌在 message 里，不在事件顶层。
+		Message struct {
+			Usage struct {
+				InputTokens int `json:"input_tokens"`
+			} `json:"usage"`
+		} `json:"message"`
 		Usage struct {
 			InputTokens  int `json:"input_tokens"`
 			OutputTokens int `json:"output_tokens"`
@@ -452,8 +458,8 @@ func (s *openAIStream) feed(line string) bool {
 	produced := false
 	switch event.Type {
 	case "message_start":
-		if event.Usage.InputTokens > 0 {
-			s.usage.InputTokens = event.Usage.InputTokens
+		if event.Message.Usage.InputTokens > 0 {
+			s.usage.InputTokens = event.Message.Usage.InputTokens
 		}
 	case "content_block_start":
 		if event.ContentBlock.Type == "tool_use" {

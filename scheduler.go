@@ -356,7 +356,6 @@ func (p *Pool) TouchSession(sessionKey string) {
 	p.store.db.TouchBinding(sessionKey, time.Now().Unix(), p.stickyTTL)
 }
 
-
 // poolCandidate 是加权选号中间态：账号 + 本次请求里的权重。
 type poolCandidate struct {
 	acc    *Account
@@ -445,6 +444,7 @@ func weightedShuffle(list []poolCandidate) []*Account {
 	}
 	return out
 }
+
 var errNoAvailableAccount = &poolError{"no available account"}
 
 type poolError struct{ message string }
@@ -481,6 +481,13 @@ func extractSessionKey(r *http.Request, body map[string]any) string {
 			}
 		}
 	}
+	// 兜底：header 和 body 都没有会话标识时，从内容派生。
+	// 通用 OpenAI 客户端（Codex / Cherry Studio 之类）body 里既没有 conversation_id
+	// 也没有 metadata，会话键恒空 → 粘性完全不命中 → 同一对话每轮换号 →
+	// 上游前缀缓存全 miss。用「system + 首条 user」派生一个稳定键补上。
+	if derived := deriveSessionKey(body); derived != "" {
+		return derived
+	}
 	return ""
 }
 
@@ -491,4 +498,85 @@ func sessionKey(value string) string {
 	}
 	sum := sha256.Sum256([]byte(value))
 	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// minDerivedSessionChars 是内容派生会话键的最小首条消息长度。
+// 太短的（"hi"/"hello"）不派生：不同对话撞同一个键会把请求挤到一个账号上，
+// 而短对话本来也没有前缀缓存收益。
+const minDerivedSessionChars = 16
+
+// deriveSessionKey 从请求内容派生会话键。
+//
+// 用「system + 首条 user」而不是全量消息：多轮对话里历史每轮追加，全量哈希
+// 每轮都变，粘性会彻底失效；而这两部分在一次对话中恒定。
+// 取不到内容时返回空串，绝不编造，让调用方回落到轮换。
+func deriveSessionKey(body map[string]any) string {
+	if body == nil {
+		return ""
+	}
+	first := strings.TrimSpace(firstUserText(body["messages"]))
+	if len([]rune(first)) < minDerivedSessionChars {
+		return ""
+	}
+	system := strings.TrimSpace(textOfContent(body["system"]))
+	sum := sha256.Sum256([]byte(system + "\x00" + first))
+	return "d-" + hex.EncodeToString(sum[:8])
+}
+
+func firstUserText(messages any) string {
+	list, ok := messages.([]any)
+	if !ok {
+		return ""
+	}
+	for _, item := range list {
+		msg, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if role, _ := msg["role"].(string); role != "user" {
+			continue
+		}
+		return textOfContent(msg["content"])
+	}
+	return ""
+}
+
+// textOfContent 把 string 或 content block 数组拍平成文本。
+
+// promptCacheKeyFor 给上游一个稳定的前缀缓存路由键。
+//
+// 实测依据（KeyPort 的注释）：同一段 8k token 前缀，不带 key 时
+// prompt_cache_hit_tokens=0、费用约 0.34；带上后命中 7808 token、费用约 0.02
+// —— 差约 17 倍。
+//
+// 构造里必须掺入账号 uid：跨账号复用同一个 key 会让上游命中别人的前缀缓存，
+// 等于把对话内容泄露给另一个账号。
+//
+// 默认关闭（ZCODE_PROMPT_CACHE_KEY=1 才开）：上游对未知顶层字段的容忍度
+// 没有实测过，贸然加字段一旦被拒就是全站 400。
+func promptCacheKeyFor(acc *Account, sessionKey string) string {
+	if acc == nil || sessionKey == "" {
+		return ""
+	}
+	uid := acc.User.ID
+	if uid == "" {
+		uid = acc.ID
+	}
+	sum := sha256.Sum256([]byte(uid + "|" + sessionKey))
+	return "zcg-" + hex.EncodeToString(sum[:8])
+}
+func textOfContent(value any) string {
+	switch v := value.(type) {
+	case string:
+		return v
+	case []any:
+		var b strings.Builder
+		for _, block := range v {
+			b.WriteString(blockText(block))
+		}
+		return b.String()
+	case map[string]any:
+		return blockText(v)
+	}
+	return ""
 }

@@ -85,27 +85,56 @@ zcode-claimer.timer（每小时 :17）──► 面板管理接口 ──► 上
 
 | 上游信号 | 处置 | 账号状态 |
 |---|---|---|
+| **HTTP 200 + 业务码** | 先 peek 响应体判形状（`business.go`）：有 `content`/`choices`/`data` 的一律放行，否则按业务码处理。**不再当成功渲染，也不再 `ResetRiskStrikes`** | 见下面各码 |
 | 429 频控 | 按 `Retry-After` 原地等（默认 5s，封顶 120s，总预算 `ZCODE_RETRY_WAIT_SEC`=20s），耗尽才换号 | 保持可用，不计连败 |
-| 1113 无资源包 | 不等待，直接换号；只记模型级失败 | 保持可用 |
+| 1005 / 1113 / 1308–1321 额度耗尽族 | 不等待，直接换号；只记模型级失败 | 保持可用 |
+| 1302 / 1305 瞬时限流 | 短退避后换号 | 保持可用 |
+| 3009 / 3010 模型并发准入 | 等 1s 重试（原版客户端也是 1s/2s 退避） | 保持可用 |
 | 3007 验证码被拒 | 换码重试（下一次请求会重新求解） | 保持可用 |
+| 验证码挑战（`x-aliyun-captcha-*` 响应头，或 400/403 上的 captcha 文案） | 同上，**必须排在「403 → 停用」之前**，否则一次人机校验续期就把好号踢掉 | 保持可用 |
 | 内容策略拦截 | 视为 system 指纹误报，换号重试 | 保持可用 |
 | 5xx | 冷却 5 分钟后换号 | `cooling` |
 | 3012 风控 | 不原地重试，指数退避 15min 起翻倍封顶 24h（`riskStrikes` 累计） | `cooling` |
-| 401/403/3004 | 直接停用，等人工重新授权 | `disabled` |
+| 401 / 403（非验证码）/ 3004 | 直接停用，等人工重新授权 | `disabled` |
 
-选号从纯随机改成「余额占比 + 闲置时长」加权：先按权重取前 N（`ZCODE_POOL_TOPN`，默认 5）
-做加权抽签，短名单之外再按权重降序兜底，保证每个健康账号仍会被试到。
+业务码解析兼容三种形态（`parseUpstreamEnvelope`）：`{"code":..}`、
+`{"error":{"code":..}}`、以及 api.z.ai 回退通道的 `{"error":{"type":"1000"}}`
+——**码在 `type` 里**，不读它就等于回退通道的业务码全丢。
 
-## OpenAI 兼容端点
+## 兼容端点
 
-`POST /v1/chat/completions` 和 `/v1/messages` 并存，重试/降级逻辑共用一份 `relay()`。
-入站把 chat.completions 翻成 Anthropic，出站把响应或 SSE 翻回 `chat.completion`：
+三个入口并存，重试 / 降级 / 记账逻辑共用一份 `relay()`，只在编解码上有差别：
+
+| 端点 | 入站转换 | 出站转换 |
+|---|---|---|
+| `POST /v1/messages` | 原样 | 原样 |
+| `POST /v1/chat/completions` | chat.completions → Anthropic | Anthropic → `chat.completion` |
+| `POST /v1/responses` | Responses → Anthropic | Anthropic → `response` |
+
+**chat.completions**（`openai.go`）：
 
 - 支持文本、`image_url` 的 data URI、`tools[].function`、`role:tool` 的 tool 结果、
   `stop`、`temperature`/`top_p`、`max_tokens`（缺省补 4096，Anthropic 必填）。
 - `tool_choice` 上游会忽略，网关仍按规范映射，但别指望它强制调用。
 - 流式会把 Anthropic 的 `message_start`/`content_block_delta`/`message_delta`
   翻成 `chat.completion.chunk`，末尾补 `data: [DONE]`。
+
+**responses**（`responses.go`）：
+
+- `input` 支持字符串和 item 数组；`instructions` → `system`；
+  `function_call` / `function_call_output` 合并进相邻消息的 content block，
+  避免出现空轮次。
+- 工具是扁平格式（`{"type":"function","name":..,"parameters":..}`），
+  转成 Anthropic 的 `input_schema`。
+- 流式事件按 Responses 规范发：`response.created` → `output_item.added` →
+  `content_part.added` → `output_text.delta`×N → `output_text.done` →
+  `content_part.done` → `output_item.done` → `response.completed`。
+- 上游没给 `stop_reason` 就断流时报 `status: incomplete`，不假装成功。
+
+**流式请求的 `input_tokens` 上游一律报 0**。实测 `message_start` 里就是
+`{"input_tokens":0,"output_tokens":0}`，非流式才给真实值（同一次请求
+非流式 260 / 流式 0）。这是上游行为，不是网关丢数据——按 token 计费的
+统计要么走非流式口径，要么用本地估算。
 
 ## 领取退避
 
@@ -242,6 +271,27 @@ TLS）→ CONNECT → 对目标再做一次 TLS → 发 `GET /api/v1/client/conf
     等于白丢 17 分钟；64 个号一轮 40+ 分钟，火爆的活动这时可能已经领完。现在 timer 改
     `:03`，默认时段 `19-21`（19:03 抢名额 / 20:03 补首轮失败 / 21:03 兜住晚开的活动）。
     已经领到的号在本地比对后直接跳过，多排一轮几乎不花时间。
+
+14. **HTTP 200 也会承载业务失败**。没套餐的号回 `{"code":1005,"msg":"exceed quota limit"}`，
+    额度耗尽的 13xx 族同理。原来 `handleAttempt` 只看 status，200 就直接渲染 +
+    记成功 + `ResetRiskStrikes`——错误 JSON 塞给客户端、日志里全是成功、
+    还把 3012 的 strike 计数洗掉（指数退避永远升不上去）。现在先 peek 开头 4KB
+    判形状（`business.go`），有 `content`/`choices`/`data` 的一律放行，
+    避免把正常响应误判成错误。
+
+15. **403 不一定是认证失败**。阿里云验证码挑战会回 400/403 + `x-aliyun-captcha-*`
+    响应头，body 里没有 3007。原来 `classify.go` 把 401/403 一律 `Disable`，
+    等于一次人机校验续期就把健康号停用 30 分钟。现在验证码判定排在状态码之前，
+    头、3007、文案三条证据任一条命中都按「换码重试」处理。
+
+16. **流式请求的 `input_tokens` 上游恒为 0**。`message_start` 里就是
+    `{"input_tokens":0,"output_tokens":0}`，同一次请求非流式才给真实值
+    （实测 260 vs 0）。别拿流式 usage 去算成本，会系统性少记。
+
+17. **`prompt_cache_key` 默认关闭**（`ZCODE_PROMPT_CACHE_KEY=1` 才开）。业界实测
+    这个字段能把 8k 前缀的缓存命中率从 0 拉到 7808 token（费用差约 17 倍），
+    但上游对未知顶层字段的容忍度没实测过，贸然加一旦被拒就是全站 400。
+    构造里掺了账号 uid，防止跨账号命中别人的前缀缓存。
 
 ## 出口 IP 与风控
 

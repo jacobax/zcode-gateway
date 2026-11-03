@@ -217,16 +217,16 @@ func (s *Server) ensureProjectToken(ctx context.Context, acc *Account) (string, 
 	return token, nil
 }
 
-func (s *Server) Forward(ctx context.Context, acc *Account, body map[string]any, clientHeaders map[string]string) (*fhttp.Response, []byte, error) {
-	return s.forward(ctx, acc, body, clientHeaders, false)
+func (s *Server) Forward(ctx context.Context, acc *Account, body map[string]any, clientHeaders map[string]string, sessionKey string) (*fhttp.Response, []byte, error) {
+	return s.forward(ctx, acc, body, clientHeaders, false, sessionKey)
 }
 
 // ForwardViaEgress 走可选出口（本地中继 / 独立代理），用于直连被风控时的兜底重试。
-func (s *Server) ForwardViaEgress(ctx context.Context, acc *Account, body map[string]any, clientHeaders map[string]string) (*fhttp.Response, []byte, error) {
-	return s.forward(ctx, acc, body, clientHeaders, true)
+func (s *Server) ForwardViaEgress(ctx context.Context, acc *Account, body map[string]any, clientHeaders map[string]string, sessionKey string) (*fhttp.Response, []byte, error) {
+	return s.forward(ctx, acc, body, clientHeaders, true, sessionKey)
 }
 
-func (s *Server) forward(ctx context.Context, acc *Account, body map[string]any, clientHeaders map[string]string, viaEgress bool) (*fhttp.Response, []byte, error) {
+func (s *Server) forward(ctx context.Context, acc *Account, body map[string]any, clientHeaders map[string]string, viaEgress bool, sessionKey string) (*fhttp.Response, []byte, error) {
 	payload := make(map[string]any, len(body))
 	for k, v := range body {
 		payload[k] = v
@@ -252,6 +252,14 @@ func (s *Server) forward(ctx context.Context, acc *Account, body map[string]any,
 		}
 	}
 	payload["system"] = mergeClientSystem(payload["system"])
+	// 前缀缓存路由键：默认关闭，见 promptCacheKeyFor 的说明。
+	if os.Getenv("ZCODE_PROMPT_CACHE_KEY") == "1" {
+		if _, exists := payload["prompt_cache_key"]; !exists {
+			if key := promptCacheKeyFor(acc, sessionKey); key != "" {
+				payload["prompt_cache_key"] = key
+			}
+		}
+	}
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return nil, nil, err
