@@ -38,6 +38,8 @@ type Server struct {
 	login          *loginThrottle
 	updates        *updateChecker
 	claim          *claimJob
+	// quotaClient 是测试注入点：nil 表示走 upstream，生产恒为 nil。
+	quotaClient HTTPDoer
 }
 
 func NewServer(store *Store, upstream *Upstream, baseURL string) *Server {
