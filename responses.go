@@ -245,11 +245,12 @@ func parseJSONObject(raw string) map[string]any {
 func anthropicToResponsesResponse(data []byte, model string) ([]byte, Usage, error) {
 	var parsed struct {
 		Content []struct {
-			Type  string          `json:"type"`
-			Text  string          `json:"text"`
-			ID    string          `json:"id"`
-			Name  string          `json:"name"`
-			Input json.RawMessage `json:"input"`
+			Type     string          `json:"type"`
+			Text     string          `json:"text"`
+			Thinking string          `json:"thinking"`
+			ID       string          `json:"id"`
+			Name     string          `json:"name"`
+			Input    json.RawMessage `json:"input"`
 		} `json:"content"`
 		Usage struct {
 			InputTokens  int `json:"input_tokens"`
@@ -263,6 +264,15 @@ func anthropicToResponsesResponse(data []byte, model string) ([]byte, Usage, err
 	output := make([]any, 0, len(parsed.Content))
 	for _, block := range parsed.Content {
 		switch block.Type {
+		case "thinking":
+			if block.Thinking == "" {
+				continue
+			}
+			// 只思考不出字时 output 不能是空数组：形状和流式的 reasoning item 对齐。
+			output = append(output, map[string]any{
+				"type": "reasoning", "id": "rs_" + randomHex(12),
+				"summary": []any{map[string]any{"type": "summary_text", "text": block.Thinking}},
+			})
 		case "text":
 			if block.Text == "" {
 				continue

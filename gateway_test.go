@@ -550,19 +550,15 @@ func TestActivityTokenSelection(t *testing.T) {
 	// marketing/touch 会回 200 但 deliveries:[]，看起来像"没有活动"，
 	// 实际是把活动页静默弄空了（2026-11 实测）。
 	acc := &Account{AccessToken: "access-token", ZcodeJWT: "zcode-jwt"}
-	for _, path := range []string{
-		"/api/v1/marketing/touch",
-		"/api/v1/zcode-plan/billing/preview",
-		"/api/v1/zcode-plan/billing/claim",
-		"/api/v1/zcode-plan/billing/current",
-	} {
-		if got := activityTokenForPath(acc, path); got != "zcode-jwt" {
-			t.Fatalf("%s should use zcode JWT, got %q", path, got)
-		}
+	if got := activityToken(acc); got != "zcode-jwt" {
+		t.Fatalf("activity calls should prefer the zcode JWT, got %q", got)
 	}
 	fallback := &Account{AccessToken: "access-token"}
-	if got := activityTokenForPath(fallback, "/api/v1/zcode-plan/billing/claim"); got != "access-token" {
-		t.Fatalf("claim fallback should use access token, got %q", got)
+	if got := activityToken(fallback); got != "access-token" {
+		t.Fatalf("fallback should use the access token, got %q", got)
+	}
+	if got := activityToken(&Account{}); got != "" {
+		t.Fatalf("account without credentials should yield an empty token, got %q", got)
 	}
 }
 

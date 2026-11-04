@@ -290,3 +290,53 @@ func TestResponsesEndToEnd(t *testing.T) {
 		t.Fatalf("usage: %#v", parsed.Usage)
 	}
 }
+
+// 非流式也要把 thinking 带出来：GLM 先发 thinking 再发 text，只思考不出字时
+// output 不能是空数组（流式那边发的是 reasoning item，这里保持同一形状）。
+func TestAnthropicToResponsesThinking(t *testing.T) {
+	data := []byte(`{"id":"msg_1","content":[{"type":"thinking","thinking":"先想一下"},{"type":"text","text":"好了"}],"usage":{"input_tokens":1,"output_tokens":2}}`)
+	out, usage, err := anthropicToResponsesResponse(data, "GLM-5.3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage.InputTokens != 1 || usage.OutputTokens != 2 {
+		t.Fatalf("usage: %#v", usage)
+	}
+	var parsed struct {
+		Output []struct {
+			Type    string `json:"type"`
+			Summary []struct {
+				Text string `json:"text"`
+			} `json:"summary"`
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"output"`
+	}
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed.Output) != 2 {
+		t.Fatalf("thinking + text should yield 2 items, got %d: %s", len(parsed.Output), out)
+	}
+	if parsed.Output[0].Type != "reasoning" || len(parsed.Output[0].Summary) != 1 || parsed.Output[0].Summary[0].Text != "先想一下" {
+		t.Fatalf("reasoning item: %#v", parsed.Output[0])
+	}
+	if parsed.Output[1].Type != "message" || len(parsed.Output[1].Content) != 1 || parsed.Output[1].Content[0].Text != "好了" {
+		t.Fatalf("message item: %#v", parsed.Output[1])
+	}
+
+	onlyThinking, _, err := anthropicToResponsesResponse([]byte(`{"content":[{"type":"thinking","thinking":"只有思考"}]}`), "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsedOnly struct {
+		Output []struct {
+			Type string `json:"type"`
+		} `json:"output"`
+	}
+	_ = json.Unmarshal(onlyThinking, &parsedOnly)
+	if len(parsedOnly.Output) != 1 || parsedOnly.Output[0].Type != "reasoning" {
+		t.Fatalf("thinking-only response should still carry a reasoning item: %s", onlyThinking)
+	}
+}

@@ -18,19 +18,17 @@ func main() {
 	// 参数先处理：`zcode-gateway --version` 曾经被当成正常启动，在默认端口上
 	// 留下一个跑了几天的幽灵实例。未知参数一律拒绝启动，别让打错的 flag
 	// 悄悄变成一个服务。
-	for _, arg := range os.Args[1:] {
-		switch arg {
-		case "-v", "-version", "--version", "version":
-			fmt.Printf("zcode-gateway %s (client %s, claim %s)\n", buildVersion, appVersion, claimAppVersion())
-			return
-		case "-h", "-help", "--help", "help":
-			printUsage(os.Stdout)
-			return
-		default:
-			fmt.Fprintf(os.Stderr, "未知参数 %q\n\n", arg)
-			printUsage(os.Stderr)
-			os.Exit(2)
-		}
+	switch action, arg := parseCLIArgs(os.Args[1:]); action {
+	case cliVersion:
+		fmt.Printf("zcode-gateway %s (client %s, claim %s)\n", buildVersion, appVersion, claimAppVersion())
+		return
+	case cliHelp:
+		printUsage(os.Stdout)
+		return
+	case cliInvalid:
+		fmt.Fprintf(os.Stderr, "未知参数 %q\n\n", arg)
+		printUsage(os.Stderr)
+		os.Exit(2)
 	}
 	addr := envOr("ZCODE_GATEWAY_ADDR", "127.0.0.1:8787")
 	dataDir := envOr("ZCODE_GATEWAY_DATA", "data")
@@ -182,4 +180,29 @@ func printUsage(w io.Writer) {
 
 配置全部通过环境变量，见 README.md 与 OPERATIONS.md。
 `, buildVersion, appVersion)
+}
+
+// cliAction 是命令行参数的处理结果。
+type cliAction int
+
+const (
+	cliRun cliAction = iota
+	cliVersion
+	cliHelp
+	cliInvalid
+)
+
+// parseCLIArgs 只看第一个参数：要版本、要帮助，或者拒绝启动。
+func parseCLIArgs(args []string) (cliAction, string) {
+	if len(args) == 0 {
+		return cliRun, ""
+	}
+	switch args[0] {
+	case "-v", "-version", "--version", "version":
+		return cliVersion, ""
+	case "-h", "-help", "--help", "help":
+		return cliHelp, ""
+	default:
+		return cliInvalid, args[0]
+	}
 }

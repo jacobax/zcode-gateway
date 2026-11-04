@@ -781,23 +781,26 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request, opts relayOptions
 				s.applyVerdict(acc, verdict, opts.model)
 			}
 		}()
-		if done || r.Context().Err() != nil {
+		if r.Context().Err() != nil {
 			return
 		}
-		if verdict.Retry && verdict.Wait > 0 && verdict.Wait <= waitBudget {
+		var step relayStep
+		step, waitBudget = nextRelayStep(verdict, done, waitBudget)
+		switch step {
+		case relayDone:
+			return
+		case relayWait:
 			// 账号没坏，等一会儿打同一个号；不占换号预算。
-			waitBudget -= verdict.Wait
 			select {
 			case <-time.After(verdict.Wait):
 			case <-r.Context().Done():
 				return
 			}
 			attempt--
-			continue
-		}
-		if verdict.Retry {
+		case relaySwitch:
 			tried[acc.ID] = true
-			continue
+		case relayRetry:
+			// 转发本身失败，没拿到响应：直接下一轮。
 		}
 	}
 
@@ -810,6 +813,49 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request, opts relayOptions
 		return
 	}
 	opts.writeUpstream(w, lastStatus, lastBody)
+}
+
+// relayStep 是一次尝试结束后的去向。
+type relayStep int
+
+const (
+	// relayDone：响应已经写出，或不该再试，结束。
+	relayDone relayStep = iota
+	// relayWait：账号健康、只是被频控，原地等一会儿再打同一个号。
+	relayWait
+	// relaySwitch：换个号再来，当前号记进 tried。
+	relaySwitch
+	// relayRetry：转发本身失败（没拿到响应），直接下一轮，账号不记 tried。
+	relayRetry
+)
+
+func (s relayStep) String() string {
+	switch s {
+	case relayDone:
+		return "done"
+	case relayWait:
+		return "wait"
+	case relaySwitch:
+		return "switch"
+	case relayRetry:
+		return "retry"
+	}
+	return "unknown"
+}
+
+// nextRelayStep 把「上游分类结论 + 剩余等待预算」翻成下一步动作，并返回新的
+// 预算。预算是整个请求共享的：等频控花完就换号，别在一个号上把时间耗光。
+func nextRelayStep(verdict upstreamVerdict, done bool, waitBudget time.Duration) (relayStep, time.Duration) {
+	switch {
+	case done:
+		return relayDone, waitBudget
+	case verdict.Retry && verdict.Wait > 0 && verdict.Wait <= waitBudget:
+		return relayWait, waitBudget - verdict.Wait
+	case verdict.Retry:
+		return relaySwitch, waitBudget
+	default:
+		return relayRetry, waitBudget
+	}
 }
 
 func (s *Server) forwardVia(ctx context.Context, acc *Account, body map[string]any, clientHeaders map[string]string, viaEgress bool, sessionKey string) (*fhttp.Response, []byte, error) {

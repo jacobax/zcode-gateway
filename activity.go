@@ -173,12 +173,8 @@ func activityToken(acc *Account) string {
 	return strings.TrimSpace(acc.AccessToken)
 }
 
-func activityTokenForPath(acc *Account, path string) string {
-	return activityToken(acc)
-}
-
 func (s *Server) zcodeAPICall(ctx context.Context, acc *Account, method, path string, query url.Values, payload any, extraHeaders map[string]string) (map[string]any, int, error) {
-	token := activityTokenForPath(acc, path)
+	token := activityToken(acc)
 	if token == "" {
 		return nil, 0, fmt.Errorf("账号没有可用的登录凭据")
 	}
