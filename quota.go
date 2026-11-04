@@ -510,7 +510,7 @@ func pendingWhen(items []QuotaPending) string {
 }
 
 func (s *Server) tryBalance(ctx context.Context, acc *Account, plan *PlanInfo) (*PlanResponse, error) {
-	base := "https://zcode.z.ai/api/v1/zcode-plan/billing/balance"
+	base := upstreamBase() + "/api/v1/zcode-plan/billing/balance"
 	headers := s.profileHeaders(acc)
 	headers["Authorization"] = "Bearer " + acc.ZcodeJWT
 	headers["Accept"] = "application/json"

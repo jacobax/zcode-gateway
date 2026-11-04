@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -15,22 +16,36 @@ import (
 // 记事件 → 踢会话），上游用 fakeQuotaDoer 顶掉，全程不联网。
 
 type fakeQuotaDoer struct {
-	current       string
-	balance       string
-	currentStatus int
-	balanceStatus int
+	current        string
+	balance        string
+	currentStatus  int
+	balanceStatus  int
+	err            error
+	balanceReadErr bool
 }
 
 func (d fakeQuotaDoer) Do(req *fhttp.Request) (*fhttp.Response, error) {
+	if d.err != nil {
+		return nil, d.err
+	}
 	switch {
 	case strings.Contains(req.URL.Path, "/billing/current"):
 		return fakeJSON(d.currentStatus, d.current), nil
 	case strings.Contains(req.URL.Path, "/billing/balance"):
+		if d.balanceReadErr {
+			return &fhttp.Response{StatusCode: 200, Header: fhttp.Header{}, Body: errReadCloser{}}, nil
+		}
 		return fakeJSON(d.balanceStatus, d.balance), nil
 	default:
 		return fakeJSON(404, `{"code":404,"msg":"unexpected path"}`), nil
 	}
 }
+
+// errReadCloser 模拟「连接断了、body 读不出来」。
+type errReadCloser struct{}
+
+func (errReadCloser) Read([]byte) (int, error) { return 0, errors.New("read failed") }
+func (errReadCloser) Close() error             { return nil }
 
 func fakeJSON(status int, body string) *fhttp.Response {
 	if status == 0 {
@@ -196,5 +211,29 @@ func TestQuotaHTTPFallsBackToUpstream(t *testing.T) {
 	server.quotaClient = fake
 	if got := server.quotaHTTP(); got != HTTPDoer(fake) {
 		t.Fatalf("injected client must win, got %#v", got)
+	}
+}
+
+func TestTryBalanceErrorBranches(t *testing.T) {
+	server, store := newQuotaTestServer(t)
+	acc := store.GetAccount("acc1")
+	ctx := context.Background()
+	cases := []struct {
+		name string
+		doer fakeQuotaDoer
+	}{
+		{"传输层失败", fakeQuotaDoer{err: errors.New("dial failed")}},
+		{"读 body 失败", fakeQuotaDoer{balanceReadErr: true}},
+		{"响应不是 JSON", fakeQuotaDoer{balance: `<html>oops</html>`}},
+		{"HTTP 非 200", fakeQuotaDoer{balanceStatus: 502, balance: `{"code":0}`}},
+		{"业务码非 0", fakeQuotaDoer{balance: `{"code":1308,"msg":"usage limit"}`}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server.quotaClient = tc.doer
+			if _, err := server.tryBalance(ctx, acc, nil); err == nil {
+				t.Fatal("expected an error")
+			}
+		})
 	}
 }

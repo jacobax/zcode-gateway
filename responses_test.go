@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -210,5 +212,81 @@ func TestResponsesStreamThinking(t *testing.T) {
 	}
 	if len(stream.output) != 2 {
 		t.Fatalf("want 2 output items (reasoning + message), got %d", len(stream.output))
+	}
+}
+
+// 端到端：/v1/responses 打到会返回 Anthropic JSON 的假上游（非流式），
+// 验证请求翻译、响应改写和 usage 透传。
+func TestResponsesEndToEnd(t *testing.T) {
+	dir, err := os.MkdirTemp("", "zcg-responses-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = store.Close()
+		_ = os.RemoveAll(dir)
+	})
+	store.accounts = nil
+	store.settings.ProxyToken = ""
+	acc := &Account{
+		ID: "rs-1", Label: "rs-1", Provider: "zai", Mode: "start-plan",
+		User: UserInfo{ID: "rs-user"}, Enabled: true, CreatedAt: 1,
+		ZcodeJWT: "fake-token", Models: map[string]*UsageTotals{},
+		Quota: Quota{Granted: 1000, Remaining: 1000},
+	}
+	if err := store.AddAccount(acc); err != nil {
+		t.Fatal(err)
+	}
+
+	var seen map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&seen)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_9","type":"message","role":"assistant","content":[{"type":"text","text":"你好"}],"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":2}}`))
+	}))
+	t.Cleanup(upstream.Close)
+	t.Setenv("ZCODE_UPSTREAM", upstream.URL+"/v1/messages")
+
+	server := NewServer(store, mustUpstream(t), "http://test")
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(
+		`{"model":"GLM-5.3","input":"hi","max_output_tokens":64}`))
+	req.Header.Set("Content-Type", "application/json")
+	server.handleResponses(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, ok := seen["messages"].([]any); !ok {
+		t.Fatalf("upstream did not receive anthropic messages: %#v", seen)
+	}
+	var parsed struct {
+		Object string `json:"object"`
+		Output []struct {
+			Type    string `json:"type"`
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"output"`
+		Usage struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &parsed); err != nil {
+		t.Fatalf("response is not JSON: %s", rec.Body.String())
+	}
+	if parsed.Object != "response" {
+		t.Fatalf("object: %q body=%s", parsed.Object, rec.Body.String())
+	}
+	if len(parsed.Output) != 1 || parsed.Output[0].Type != "message" || len(parsed.Output[0].Content) != 1 || parsed.Output[0].Content[0].Text != "你好" {
+		t.Fatalf("output: %#v body=%s", parsed.Output, rec.Body.String())
+	}
+	if parsed.Usage.InputTokens != 3 || parsed.Usage.OutputTokens != 2 {
+		t.Fatalf("usage: %#v", parsed.Usage)
 	}
 }

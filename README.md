@@ -150,7 +150,8 @@ go build -trimpath -ldflags="-s -w" -o zcode-gateway .
 | `ZCODE_GATEWAY_DATA` | `data` | 数据目录（`accounts.json`、`master.key`、`gateway.db`） |
 | `ZCODE_ADMIN_PASSWORD` | 随机生成 | 面板密码**初始值**；面板里改过后以面板为准 |
 | `ZCODE_APP_VERSION` | `3.16.3` | 模拟的 ZCode 客户端版本（UA 与 `X-ZCode-App-Version` 等身份头都取它）。**升级前必须做单账号 A/B 验证**，见 `OPERATIONS.md` 第 10 条坑 |
-| `ZCODE_UPSTREAM` | `https://zcode.z.ai` | 上游地址 |
+| `ZCODE_UPSTREAM` | 空 | 覆盖**模型转发端点**的整条 URL（端到端测试用它指向 httptest）；不影响额度/活动/OAuth |
+| `ZCODE_UPSTREAM_BASE` | `https://zcode.z.ai` | 额度/活动/OAuth 这一族接口的根地址，自建镜像时改它 |
 | `ZCODE_PROXY_URL_CLAIM` | 空 | 只给领取/活动用的出口（通常指向本地中继） |
 | `ZCODE_PROXY_URL_EGRESS` | 同 `CLAIM` | 模型流量可选出口；面板「网关出口」决定用不用 |
 | `ZCODE_POOL_TOPN` | `5` | 加权选号的短名单大小 |

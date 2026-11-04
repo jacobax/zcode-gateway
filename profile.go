@@ -261,19 +261,6 @@ func (s *Store) RotateProfile(accountID string) *DeviceProfile {
 	return nil
 }
 
-// ProfileOf returns the account's profile without generating or saving one.
-func (s *Store) ProfileOf(acc *Account) DeviceProfile {
-	if acc != nil && acc.Profile != nil {
-		return *acc.Profile
-	}
-	if acc != nil && s.db != nil {
-		if row, err := s.loadProfile(acc.ID); err == nil && row.Found {
-			return row.Profile
-		}
-	}
-	return DeviceProfile{}
-}
-
 func (s *Store) SetConcurrency(accountID string, n int) bool {
 	n = normalizeConcurrency(n)
 	ok := s.UpdateAccountMemory(accountID, func(a *Account) {

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -16,7 +15,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	fhttp "github.com/bogdanfinn/fhttp"
@@ -57,36 +55,6 @@ func NewServer(store *Store, upstream *Upstream, baseURL string) *Server {
 	}
 	server.initAdminPassword()
 	return server
-}
-
-func (s *Server) summary(acc *Account) *AccountSummary {
-	if acc == nil {
-		return nil
-	}
-	status := "可用"
-	switch {
-	case !acc.Enabled:
-		status = "已禁用"
-	case acc.Quota.Granted > 0 && acc.Quota.Remaining <= 0:
-		status = "额度耗尽"
-	case acc.ExhaustedUntil > time.Now().Unix():
-		status = "冷却中"
-	}
-	summary := &AccountSummary{
-		ID: acc.ID, Label: acc.Label, Provider: acc.Provider, Mode: acc.Mode,
-		Priority: acc.Priority, Enabled: acc.Enabled, Status: status,
-		Concurrency: normalizeConcurrency(acc.Concurrency), ConcurrencyEffective: s.store.EffectiveConcurrency(acc),
-		User: acc.User, Quota: acc.Quota, LastError: acc.LastError,
-		ExhaustedUntil: acc.ExhaustedUntil, ClaimBlockedUntil: acc.ClaimBlockedUntil,
-		LastUsedAt: acc.LastUsedAt, CreatedAt: acc.CreatedAt, Usage: acc.Usage,
-	}
-	if profile := s.store.ProfileOf(acc); profile.DeviceMid != "" {
-		summary.Platform = profile.Platform + "-" + profile.Arch
-		summary.OSVersion = profile.OSVersion
-		summary.Screen = profile.Screen
-		summary.DeviceMid = profile.DeviceMid
-	}
-	return summary
 }
 
 func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
@@ -276,7 +244,7 @@ func (s *Server) handleOAuthStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	out := map[string]any{"status": status}
 	if acc != nil {
-		out["account"] = s.summary(acc)
+		out["account"] = s.store.SummaryFor(acc.ID)
 	}
 	writeJSON(w, 200, out)
 }
@@ -298,7 +266,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"status": "ready", "account": s.summary(acc)})
+	writeJSON(w, 200, map[string]any{"status": "ready", "account": s.store.SummaryFor(acc.ID)})
 }
 
 func (s *Server) handleAccountByID(w http.ResponseWriter, r *http.Request) {
@@ -372,7 +340,7 @@ func (s *Server) handleAccountByID(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 400, err.Error())
 			return
 		}
-		writeJSON(w, 200, map[string]any{"ok": true, "account": s.summary(s.store.GetAccount(id))})
+		writeJSON(w, 200, map[string]any{"ok": true, "account": s.store.SummaryFor(id)})
 	case r.Method == http.MethodPost && action == "fingerprint":
 		profile := s.store.RotateProfile(id)
 		if profile == nil {
@@ -392,7 +360,7 @@ func (s *Server) handleAccountByID(w http.ResponseWriter, r *http.Request) {
 		}
 		s.store.ResetAccountModelStates(id)
 		s.pool.signal()
-		writeJSON(w, 200, map[string]any{"ok": true, "account": s.summary(s.store.GetAccount(id))})
+		writeJSON(w, 200, map[string]any{"ok": true, "account": s.store.SummaryFor(id)})
 	case r.Method == http.MethodGet && action == "activities":
 		acc := s.store.GetAccount(id)
 		if acc == nil {
@@ -946,17 +914,8 @@ func timingMetrics(usage Usage, timing streamTiming) (int64, float64) {
 
 func (s *Server) writeUpstream(ctx context.Context, w http.ResponseWriter, resp *fhttp.Response, stream bool, start time.Time) (Usage, streamTiming, int, string) {
 	defer resp.Body.Close()
-	// Close the upstream body when the caller goes away so a disconnected
-	// downstream cannot pin the account slot.
-	stop := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = resp.Body.Close()
-		case <-stop:
-		}
-	}()
-	defer close(stop)
+	stop := closeBodyOnDone(ctx, resp.Body)
+	defer stop()
 	for _, name := range []string{"content-type", "cache-control", "x-request-id", "request-id", "x-zcode-request-id", "retry-after"} {
 		if v := resp.Header.Get(name); v != "" {
 			w.Header().Set(name, v)
@@ -970,77 +929,18 @@ func (s *Server) writeUpstream(ctx context.Context, w http.ResponseWriter, resp 
 		return parseUsageFromJSON(data), streamTiming{}, len(data), truncate(string(data), 8192)
 	}
 	flusher, _ := w.(http.Flusher)
-	reader := bufio.NewReaderSize(resp.Body, 32*1024)
 	tracker := &sseUsageTracker{}
-	total := 0
-	var preview strings.Builder
-	var timing streamTiming
-	var firstTokenAt, lastTokenAt time.Time
-	// 首字 / 流空闲超时。整轮 requestTimeout（默认 600s）管不住「上游接了请求
-	// 但一直不出字」和「出到一半卡住」这两种情况——客户端会干等十分钟。
-	// 超时直接关掉上游 body，让阻塞中的 ReadString 返回错误退出。
-	firstTimeout := envSecondsAllowZero("ZCODE_FIRST_TOKEN_TIMEOUT_SEC", 180)
-	idleTimeout := envSecondsAllowZero("ZCODE_STREAM_IDLE_TIMEOUT_SEC", 120)
-	var firstAt atomic.Int64 // UnixNano，0 = 还没出字
-	var timedOut atomic.Bool
-	closeForTimeout := func() {
-		timedOut.Store(true)
-		_ = resp.Body.Close()
-	}
-	if firstTimeout > 0 {
-		timer := time.AfterFunc(firstTimeout, func() {
-			if firstAt.Load() == 0 {
-				closeForTimeout()
-			}
-		})
-		defer timer.Stop()
-	}
-	var idleTimer *time.Timer
-	if idleTimeout > 0 {
-		idleTimer = time.AfterFunc(idleTimeout, closeForTimeout)
-		defer idleTimer.Stop()
-	}
-	for {
-		if ctx.Err() != nil {
-			break
+	timing, total, preview := pumpSSE(ctx, resp.Body, start, "anthropic", func(line string) (bool, error) {
+		produced := tracker.feed(line)
+		if _, err := io.WriteString(w, line); err != nil {
+			return produced, err
 		}
-		line, err := reader.ReadString('\n')
-		if len(line) > 0 {
-			total += len(line)
-			if preview.Len() < 8192 {
-				preview.WriteString(line)
-			}
-			if tracker.feed(line) {
-				now := time.Now()
-				if firstTokenAt.IsZero() {
-					firstTokenAt = now
-					firstAt.Store(now.UnixNano())
-				}
-				lastTokenAt = now
-				if idleTimer != nil {
-					idleTimer.Reset(idleTimeout)
-				}
-			}
-			if _, werr := io.WriteString(w, line); werr != nil {
-				break
-			}
-			if flusher != nil {
-				flusher.Flush()
-			}
+		if flusher != nil {
+			flusher.Flush()
 		}
-		if err != nil {
-			break
-		}
-	}
-	if timedOut.Load() {
-		log.Printf("stream timeout: first=%s idle=%s bytes=%d firstToken=%v",
-			firstTimeout, idleTimeout, total, !firstTokenAt.IsZero())
-	}
-	if !firstTokenAt.IsZero() {
-		timing.firstTokenMs = firstTokenAt.Sub(start).Milliseconds()
-		timing.lastTokenMs = lastTokenAt.Sub(start).Milliseconds()
-	}
-	return tracker.finish(), timing, total, truncate(preview.String(), 8192)
+		return produced, nil
+	})
+	return tracker.finish(), timing, total, preview
 }
 
 func (s *Server) recordLog(acc *Account, model string, stream bool, status int, ok bool, dur time.Duration, usage Usage, timing streamTiming, requestID, sessionKey string, r *http.Request, reqBody, respBody string, reqBytes, respBytes int, errMsg string) {

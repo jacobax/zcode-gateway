@@ -47,7 +47,7 @@ func (m *OAuthManager) Start(ctx context.Context, provider string) (*OAuthFlow, 
 	headers := sourceHeaders(profile)
 	headers["Authorization"] = "Bearer " + pollToken
 	headers["Content-Type"] = "application/json"
-	resp, err := doRequest(ctx, m.client, http.MethodPost, "https://zcode.z.ai/api/v1/oauth/cli/init", headers, body)
+	resp, err := doRequest(ctx, m.client, http.MethodPost, upstreamBase()+"/api/v1/oauth/cli/init", headers, body)
 	if err != nil {
 		return nil, err
 	}
@@ -120,7 +120,7 @@ func (m *OAuthManager) Status(ctx context.Context, flowID string) (string, *Acco
 	if flow == nil {
 		return "error", nil, errors.New("oauth flow not found")
 	}
-	url := "https://zcode.z.ai/api/v1/oauth/cli/poll/" + url.PathEscape(flow.ID)
+	url := upstreamBase() + "/api/v1/oauth/cli/poll/" + url.PathEscape(flow.ID)
 	headers := sourceHeaders(flow.profile())
 	headers["Authorization"] = "Bearer " + flow.PollToken
 	resp, err := doRequest(ctx, m.client, http.MethodGet, url, headers, nil)
@@ -193,7 +193,7 @@ func (m *OAuthManager) HandleCallback(ctx context.Context, rawURL string) (*Acco
 	})
 	headers := sourceHeaders(flow.profile())
 	headers["Content-Type"] = "application/json"
-	resp, err := doRequest(ctx, m.client, http.MethodPost, "https://zcode.z.ai/api/v1/oauth/token", headers, body)
+	resp, err := doRequest(ctx, m.client, http.MethodPost, upstreamBase()+"/api/v1/oauth/token", headers, body)
 	if err != nil {
 		return nil, err
 	}

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -524,6 +523,8 @@ func (s *openAIStream) done() {
 // writeUpstreamOpenAI 是 relay 的渲染回调：把上游响应改写成 OpenAI 形状。
 func (s *Server) writeUpstreamOpenAI(ctx context.Context, w http.ResponseWriter, resp *fhttp.Response, stream bool, model string, start time.Time) (Usage, streamTiming, int, string) {
 	defer resp.Body.Close()
+	stop := closeBodyOnDone(ctx, resp.Body)
+	defer stop()
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	if !stream {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
@@ -543,39 +544,11 @@ func (s *Server) writeUpstreamOpenAI(ctx context.Context, w http.ResponseWriter,
 	w.WriteHeader(http.StatusOK)
 
 	translator := newOpenAIStream(w, model)
-	reader := bufio.NewReaderSize(resp.Body, 32*1024)
-	var timing streamTiming
-	var firstTokenAt, lastTokenAt time.Time
-	total := 0
-	var preview strings.Builder
-	for {
-		if ctx.Err() != nil {
-			break
-		}
-		line, err := reader.ReadString('\n')
-		if len(line) > 0 {
-			total += len(line)
-			if preview.Len() < 8192 {
-				preview.WriteString(line)
-			}
-			if translator.feed(line) {
-				now := time.Now()
-				if firstTokenAt.IsZero() {
-					firstTokenAt = now
-				}
-				lastTokenAt = now
-			}
-		}
-		if err != nil {
-			break
-		}
-	}
+	timing, total, preview := pumpSSE(ctx, resp.Body, start, "openai", func(line string) (bool, error) {
+		return translator.feed(line), nil
+	})
 	translator.done()
-	if !firstTokenAt.IsZero() {
-		timing.firstTokenMs = firstTokenAt.Sub(start).Milliseconds()
-		timing.lastTokenMs = lastTokenAt.Sub(start).Milliseconds()
-	}
-	return translator.usage, timing, total, truncate(preview.String(), 8192)
+	return translator.usage, timing, total, preview
 }
 
 func firstString(values ...any) string {

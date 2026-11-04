@@ -635,63 +635,82 @@ func (s *Store) UpdateSettings(fn func(*Settings)) {
 func (s *Store) Summaries() []*AccountSummary {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := make([]*AccountSummary, 0, len(s.accounts))
 	today := s.AccountTodayStats()
 	now := time.Now()
+	out := make([]*AccountSummary, 0, len(s.accounts))
 	for _, acc := range s.sortedLocked() {
-		status := "可用"
-		if !acc.Enabled {
-			status = "已禁用"
-		} else if acc.Quota.Granted > 0 && acc.Quota.Remaining <= 0 {
-			status = "额度耗尽"
-		} else if acc.Quota.Granted == 0 && len(acc.Quota.Pending) > 0 {
-			// 已领到套餐，但 effective_at 还没到，上游还没建 balance 桶。
-			status = "待生效"
-		} else if acc.ExhaustedUntil > now.Unix() {
-			status = "冷却中"
-		}
-		stats := today[acc.ID]
-		if stats == nil {
-			stats = &TodayStats{}
-		}
-		var platform, osVersion, screen, deviceMid string
-		if acc.Profile != nil {
-			platform = acc.Profile.Platform + "-" + acc.Profile.Arch
-			osVersion = acc.Profile.OSVersion
-			screen = acc.Profile.Screen
-			deviceMid = acc.Profile.DeviceMid
-		}
-		lastUsed := acc.LastUsedAt
-		if stats.LastUsed > lastUsed {
-			lastUsed = stats.LastUsed
-		}
-		out = append(out, &AccountSummary{
-			ID:                   acc.ID,
-			Label:                acc.Label,
-			Provider:             acc.Provider,
-			Mode:                 acc.Mode,
-			Priority:             acc.Priority,
-			Enabled:              acc.Enabled,
-			Status:               status,
-			Concurrency:          normalizeConcurrency(acc.Concurrency),
-			ModelStates:          s.ModelStatesFor(acc.ID),
-			User:                 acc.User,
-			Quota:                acc.Quota,
-			LastError:            acc.LastError,
-			ExhaustedUntil:       acc.ExhaustedUntil,
-			ClaimBlockedUntil:    acc.ClaimBlockedUntil,
-			LastUsedAt:           lastUsed,
-			CreatedAt:            acc.CreatedAt,
-			Usage:                acc.Usage,
-			Today:                *stats,
-			ConcurrencyEffective: s.effectiveConcurrencyLocked(acc),
-			Platform:             platform,
-			OSVersion:            osVersion,
-			Screen:               screen,
-			DeviceMid:            deviceMid,
-		})
+		out = append(out, s.summaryLocked(acc, today[acc.ID], now))
 	}
 	return out
+}
+
+// SummaryFor 是单个账号的摘要，和 Summaries() 走同一套口径——列表和单账号
+// 接口各算一套状态的话，迟早会漂成两种说法。
+func (s *Store) SummaryFor(id string) *AccountSummary {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	today := s.AccountTodayStats()
+	now := time.Now()
+	for _, acc := range s.accounts {
+		if acc.ID == id {
+			return s.summaryLocked(acc, today[id], now)
+		}
+	}
+	return nil
+}
+
+// summaryLocked 只在持有 s.mu 时调用。
+func (s *Store) summaryLocked(acc *Account, stats *TodayStats, now time.Time) *AccountSummary {
+	status := "可用"
+	if !acc.Enabled {
+		status = "已禁用"
+	} else if acc.Quota.Granted > 0 && acc.Quota.Remaining <= 0 {
+		status = "额度耗尽"
+	} else if acc.Quota.Granted == 0 && len(acc.Quota.Pending) > 0 {
+		// 已领到套餐，但 effective_at 还没到，上游还没建 balance 桶。
+		status = "待生效"
+	} else if acc.ExhaustedUntil > now.Unix() {
+		status = "冷却中"
+	}
+	if stats == nil {
+		stats = &TodayStats{}
+	}
+	var platform, osVersion, screen, deviceMid string
+	if acc.Profile != nil {
+		platform = acc.Profile.Platform + "-" + acc.Profile.Arch
+		osVersion = acc.Profile.OSVersion
+		screen = acc.Profile.Screen
+		deviceMid = acc.Profile.DeviceMid
+	}
+	lastUsed := acc.LastUsedAt
+	if stats.LastUsed > lastUsed {
+		lastUsed = stats.LastUsed
+	}
+	return &AccountSummary{
+		ID:                   acc.ID,
+		Label:                acc.Label,
+		Provider:             acc.Provider,
+		Mode:                 acc.Mode,
+		Priority:             acc.Priority,
+		Enabled:              acc.Enabled,
+		Status:               status,
+		Concurrency:          normalizeConcurrency(acc.Concurrency),
+		ModelStates:          s.ModelStatesFor(acc.ID),
+		User:                 acc.User,
+		Quota:                acc.Quota,
+		LastError:            acc.LastError,
+		ExhaustedUntil:       acc.ExhaustedUntil,
+		ClaimBlockedUntil:    acc.ClaimBlockedUntil,
+		LastUsedAt:           lastUsed,
+		CreatedAt:            acc.CreatedAt,
+		Usage:                acc.Usage,
+		Today:                *stats,
+		ConcurrencyEffective: s.effectiveConcurrencyLocked(acc),
+		Platform:             platform,
+		OSVersion:            osVersion,
+		Screen:               screen,
+		DeviceMid:            deviceMid,
+	}
 }
 
 func (s *Store) AccountsForRefresh() []*Account {

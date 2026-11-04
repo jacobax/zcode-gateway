@@ -43,3 +43,15 @@ func envOr(key, fallback string) string {
 	}
 	return fallback
 }
+
+// upstreamBase 是额度/活动/OAuth 这一族接口的根地址，默认 zcode.z.ai；
+// 自建镜像时用 ZCODE_UPSTREAM_BASE 覆盖。
+//
+// 注意它和 ZCODE_UPSTREAM 不是一回事：后者覆盖的是模型转发端点的整条 URL
+// （端到端测试也靠它指向 httptest），只影响 /v1/messages 那条路。
+func upstreamBase() string {
+	if v := strings.TrimSpace(os.Getenv("ZCODE_UPSTREAM_BASE")); v != "" {
+		return strings.TrimRight(v, "/")
+	}
+	return "https://zcode.z.ai"
+}

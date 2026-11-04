@@ -206,7 +206,7 @@ func fetchCurrentPlan(ctx context.Context, client HTTPDoer, zcodeJWT string, hea
 	}
 	headers["Authorization"] = "Bearer " + zcodeJWT
 	headers["Accept"] = "application/json"
-	url := fmt.Sprintf("https://zcode.z.ai/api/v1/zcode-plan/billing/current?app_version=%s", appVersion)
+	url := fmt.Sprintf("%s/api/v1/zcode-plan/billing/current?app_version=%s", upstreamBase(), appVersion)
 	resp, err := doRequest(ctx, client, "GET", url, headers, nil)
 	if err != nil {
 		return nil, err

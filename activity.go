@@ -12,8 +12,6 @@ import (
 	"time"
 )
 
-const zcodeAPIBase = "https://zcode.z.ai"
-
 type ActivityEntitlement struct {
 	EntitlementID string `json:"entitlementId"`
 	Model         string `json:"model"`
@@ -140,7 +138,7 @@ func (s *Server) reportActivation(ctx context.Context, acc *Account) []string {
 		data, _ := json.Marshal(body)
 		headers := map[string]string{"Content-Type": "application/json", "User-Agent": "ZCode/" + claimAppVersion()}
 		callCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
-		resp, err := s.claimRequest(callCtx, "POST", zcodeAPIBase+"/api/v1/event/report", headers, data)
+		resp, err := s.claimRequest(callCtx, "POST", upstreamBase()+"/api/v1/event/report", headers, data)
 		if err != nil {
 			cancel()
 			warnings = append(warnings, "激活事件: "+err.Error())
@@ -201,7 +199,7 @@ func (s *Server) zcodeAPICall(ctx context.Context, acc *Account, method, path st
 		}
 		headers["Content-Type"] = "application/json"
 	}
-	target := zcodeAPIBase + path
+	target := upstreamBase() + path
 	if len(query) > 0 {
 		target += "?" + query.Encode()
 	}

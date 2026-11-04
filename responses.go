@@ -11,7 +11,6 @@ package main
 // 这里不引入第三条中间表示。
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -665,6 +664,8 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 // writeUpstreamResponses 是 relay 的渲染回调：把上游响应改写成 Responses 形状。
 func (s *Server) writeUpstreamResponses(ctx context.Context, w http.ResponseWriter, resp *fhttp.Response, stream bool, model string, start time.Time) (Usage, streamTiming, int, string) {
 	defer resp.Body.Close()
+	stop := closeBodyOnDone(ctx, resp.Body)
+	defer stop()
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	if !stream {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
@@ -687,40 +688,12 @@ func (s *Server) writeUpstreamResponses(ctx context.Context, w http.ResponseWrit
 	w.WriteHeader(200)
 	flusher, _ := w.(http.Flusher)
 	writer := newResponsesStream(w, model)
-	total := 0
-	var preview strings.Builder
-	var timing streamTiming
-	var firstTokenAt, lastTokenAt time.Time
-	reader := bufio.NewReaderSize(resp.Body, 32*1024)
-	for {
-		if ctx.Err() != nil {
-			break
-		}
-		line, err := reader.ReadString('\n')
-		if len(line) > 0 {
-			total += len(line)
-			if preview.Len() < 8192 {
-				preview.WriteString(line)
-			}
-			if writer.feed(line) {
-				now := time.Now()
-				if firstTokenAt.IsZero() {
-					firstTokenAt = now
-				}
-				lastTokenAt = now
-			}
-		}
-		if err != nil {
-			break
-		}
-	}
+	timing, total, preview := pumpSSE(ctx, resp.Body, start, "responses", func(line string) (bool, error) {
+		return writer.feed(line), nil
+	})
 	writer.done()
 	if flusher != nil {
 		flusher.Flush()
 	}
-	if !firstTokenAt.IsZero() {
-		timing.firstTokenMs = firstTokenAt.Sub(start).Milliseconds()
-		timing.lastTokenMs = lastTokenAt.Sub(start).Milliseconds()
-	}
-	return writer.usage, timing, total, truncate(preview.String(), 8192)
+	return writer.usage, timing, total, preview
 }
