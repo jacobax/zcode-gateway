@@ -101,7 +101,9 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 			// 没有套餐明细（local 额度源、或上游没返回 plans）：退回单份口径
 			stat := planStat(acc.Quota.PlanName)
 			stat.Count++
-			if acc.Enabled {
+			// 启用 = 该套餐已生效（有真实余额桶）。只有待生效权益的套餐
+			// granted 为 0，不能算进来——那只是「领到了，还没到账」。
+			if acc.Enabled && acc.Quota.Granted > 0 {
 				stat.Enabled++
 				stat.Granted += acc.Quota.Granted
 				stat.Remaining += acc.Quota.Remaining
@@ -110,7 +112,8 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 			for _, plan := range acc.Quota.Plans {
 				stat := planStat(plan.Name)
 				stat.Count++
-				if acc.Enabled {
+				// 同上：待生效的套餐 granted 为 0，不算「启用」。
+				if acc.Enabled && plan.Granted > 0 {
 					stat.Enabled++
 					stat.Granted += plan.Granted
 					stat.Remaining += plan.Remaining

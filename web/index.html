@@ -421,7 +421,7 @@
     <div class="modal-head">
       <div>
         <div class="card-kicker">添加账号</div>
-        <h2>浏览器登录授权</h2>
+        <h2>登录授权或批量导入</h2>
       </div>
       <button class="icon-btn" data-close="modal-add">×</button>
     </div>
@@ -459,6 +459,19 @@
         <button class="btn block" id="submit-callback">提交回调地址</button>
         <div class="alert error hidden" id="add-error"></div>
       </div>
+      <div class="divider"><span>或批量导入</span></div>
+      <label class="field">
+        <span>账号文件</span>
+        <input class="input" id="bulk-file" type="file" accept=".json,.txt,application/json,text/plain">
+        <small>支持 <code>zcode-accounts.json</code>（取 <code>providers.zai[].secret</code>），或每行一个 JWT 的文本。</small>
+      </label>
+      <label class="field">
+        <span>或者直接粘贴</span>
+        <textarea class="input mono" id="bulk-text" rows="5" placeholder='{"version":1,"providers":{"zai":[{"mode":"jwt","secret":"eyJ..."}]}}&#10;或者每行一个 eyJ...'></textarea>
+        <small>重复的号按 provider + JWT 里的 user_id 跳过；导入的号按 Start Plan 模式走，额度下一轮刷新。</small>
+      </label>
+      <button class="btn block" id="bulk-submit">导入</button>
+      <div class="alert hidden" id="bulk-result"></div>
     </div>
   </div>
 </div>

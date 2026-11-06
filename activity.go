@@ -75,7 +75,13 @@ func (s *Server) activityHeaders(acc *Account) map[string]string {
 }
 
 func jwtUserID(acc *Account) string {
-	token := strings.TrimSpace(acc.ZcodeJWT)
+	return jwtUserIDFromToken(acc.ZcodeJWT)
+}
+
+// jwtUserIDFromToken 从 ZCode 的 JWT 里取 user_id（没有就退回 sub）。
+// 批量导入也用它：导入的号只有 JWT，账号信息全靠这里解。
+func jwtUserIDFromToken(token string) string {
+	token = strings.TrimSpace(token)
 	parts := strings.Split(token, ".")
 	if len(parts) < 2 {
 		return ""

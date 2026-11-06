@@ -1207,6 +1207,8 @@ function openAddModal() {
   $('add-step-2').classList.add('hidden');
   $('add-error').classList.add('hidden');
   $('callback-url').value = '';
+  if ($('bulk-text')) $('bulk-text').value = '';
+  if ($('bulk-result')) $('bulk-result').className = 'alert hidden';
   stopAddPolling();
 }
 
@@ -1376,6 +1378,35 @@ async function importLocalAccount() {
   }
 }
 
+// 批量导入：粘贴 zcode-accounts.json，或每行一个 JWT。
+async function submitBulkImport() {
+  const result = $('bulk-result');
+  const content = $('bulk-text').value.trim();
+  result.className = 'alert hidden';
+  if (!content) {
+    result.className = 'alert error';
+    result.textContent = '先选择账号文件，或粘贴 JWT 列表';
+    return;
+  }
+  try {
+    const data = await api('/api/accounts/import-bulk', { method: 'POST', body: JSON.stringify({ content }) });
+    result.className = 'alert';
+    result.textContent = `导入完成：新增 ${data.imported} 个，已存在 ${data.skipped} 个，无效 ${data.invalid} 个`;
+    $('bulk-text').value = '';
+    await loadAccounts();
+    await loadOverview();
+  } catch (error) {
+    result.className = 'alert error';
+    result.textContent = error.message;
+  }
+}
+
+async function readBulkFile(input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  $('bulk-text').value = await file.text();
+}
+
 function generateProxyToken() {
   const length = 24;
   const bytes = new Uint8Array(length);
@@ -1463,6 +1494,8 @@ $('logout').addEventListener('click', async () => {
 $('add-account').addEventListener('click', openAddModal);
 $('add-account-empty').addEventListener('click', openAddModal);
 $('import-local').addEventListener('click', importLocalAccount);
+if ($('bulk-submit')) $('bulk-submit').addEventListener('click', submitBulkImport);
+if ($('bulk-file')) $('bulk-file').addEventListener('change', (event) => readBulkFile(event.target));
 $('export-accounts').addEventListener('click', () => openPortableModal('export'));
 $('restore-accounts').addEventListener('click', () => openPortableModal('restore'));
 $('portable-submit').addEventListener('click', submitPortable);

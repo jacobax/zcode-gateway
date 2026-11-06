@@ -114,6 +114,44 @@ func TestOverviewPlanAndQuotaStats(t *testing.T) {
 	}
 }
 
+// 已领取但还没生效的套餐（granted=0，权益在 Pending 里）不该算进「启用」。
+func TestOverviewSkipsPendingPlansInEnabledCount(t *testing.T) {
+	store := newTestStore(t, "overview-pending")
+	acc := &Account{
+		ID: "pending", Label: "pending", Provider: "zai", Mode: "start-plan",
+		User: UserInfo{ID: "u-pending"}, Enabled: true, CreatedAt: 1,
+		Models: map[string]*UsageTotals{},
+		Quota: Quota{
+			PlanName: "ZCODE WEEKEND BUILD",
+			Plans:    []QuotaPlan{{PlanID: "p-weekend", Name: "ZCODE WEEKEND BUILD", Granted: 0, Remaining: 0}},
+			Pending:  []QuotaPending{{PlanID: "p-weekend", PlanName: "ZCODE WEEKEND BUILD", Model: "GLM-5.3", Amount: 1000}},
+		},
+	}
+	if err := store.AddAccount(acc); err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(store, mustUpstream(t), "http://test")
+	rec := httptest.NewRecorder()
+	server.handleOverview(rec, httptest.NewRequest(http.MethodGet, "/api/overview", nil))
+	var ov Overview
+	if err := json.Unmarshal(rec.Body.Bytes(), &ov); err != nil {
+		t.Fatal(err)
+	}
+	if len(ov.Accounts.Plans) != 1 {
+		t.Fatalf("expected one plan bucket: %+v", ov.Accounts.Plans)
+	}
+	plan := ov.Accounts.Plans[0]
+	if plan.Count != 1 {
+		t.Fatalf("账号数应包含已领取的号: %+v", plan)
+	}
+	if plan.Enabled != 0 {
+		t.Fatalf("未生效的套餐不能算「启用」: %+v", plan)
+	}
+	if plan.Granted != 0 || plan.Remaining != 0 {
+		t.Fatalf("未生效的套餐不该有额度: %+v", plan)
+	}
+}
+
 // 面板套餐名要跟着"哪份额度真能用"走：领到一份还没生效的高优先级套餐时，
 // 不能把原有套餐的额度记到它名下。
 func TestDisplayPlanPrefersPlanWithQuota(t *testing.T) {
