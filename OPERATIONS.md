@@ -349,6 +349,13 @@ TLS）→ CONNECT → 对目标再做一次 TLS → 发 `GET /api/v1/client/conf
     **默认关**：换默认值前必须再走一遍单账号 A/B——提示词整段换掉会改变所有
     客户端的模型行为，不是纯兼容性开关。
 
+    2026-11-07 15:42 aws1 生产已切 317：先用「只留一个号的 data 副本 + 临时实例
+    :3001」灰度（两次 200、`input_tokens=1074`），再给主服务加 drop-in
+    `/etc/systemd/system/zcode-gateway.service.d/shape317.conf`
+    （`Environment=ZCODE_SYSTEM_SHAPE=317`）。切换后 `/health` 的 `version` 变
+    3.17.2，生产请求 200、`input_tokens=1074`，5 分钟内无 3012/405，64 个号全部
+    健康。回滚：删掉该 drop-in + `systemctl daemon-reload && systemctl restart`。
+
 11. **活动接口的客户端版本要跟着官方发版走**。2026-11-03 实测：同一账号同一套头，只改
     `app_version`——`3.15.0`/`3.16.3`/`3.16.4`/`3.17.0` 全部 `deliveries:[]` +
     领取回 `1004`，`3.17.1`/`3.18.0` 才有横幅、领取才 200。写死一个版本号，上游抬一次
