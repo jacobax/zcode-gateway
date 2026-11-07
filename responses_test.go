@@ -261,6 +261,9 @@ func TestResponsesEndToEnd(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
 	}
+	if seen["model"] != "GLM-5.3" {
+		t.Fatalf("client model not forwarded upstream: %#v", seen["model"])
+	}
 	if _, ok := seen["messages"].([]any); !ok {
 		t.Fatalf("upstream did not receive anthropic messages: %#v", seen)
 	}
@@ -338,5 +341,125 @@ func TestAnthropicToResponsesThinking(t *testing.T) {
 	_ = json.Unmarshal(onlyThinking, &parsedOnly)
 	if len(parsedOnly.Output) != 1 || parsedOnly.Output[0].Type != "reasoning" {
 		t.Fatalf("thinking-only response should still carry a reasoning item: %s", onlyThinking)
+	}
+}
+
+// Responses 的 usage 必须带 input_tokens_details / output_tokens_details：
+// async-openai 这类客户端对这两个字段没有 serde 默认值，缺了会 "missing field"
+// 直接整轮失败。input_tokens 按 OpenAI 口径含缓存命中（cached_tokens 是它的
+// 子集）——Anthropic 的 input_tokens 不含缓存，不补的话全缓存命中时客户端会
+// 看到 input_tokens=0。
+func TestResponsesUsageDetails(t *testing.T) {
+	data := []byte(`{"id":"msg_1","type":"message","role":"assistant","stop_reason":"end_turn",
+		"content":[{"type":"text","text":"hi"}],
+		"usage":{"input_tokens":40,"output_tokens":9,"cache_read_input_tokens":960,
+			"output_tokens_details":{"reasoning_tokens":3}}}`)
+	out, usage, err := anthropicToResponsesResponse(data, "glm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// DB 侧仍然分开记：缓存命中和思考 token 不能并进 input/output。
+	if usage.InputTokens != 40 || usage.CacheReadTokens != 960 || usage.ReasoningTokens != 3 {
+		t.Fatalf("usage = %#v", usage)
+	}
+	var resp struct {
+		Usage struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+			TotalTokens  int `json:"total_tokens"`
+			InputDetails struct {
+				CachedTokens int `json:"cached_tokens"`
+			} `json:"input_tokens_details"`
+			OutputDetails struct {
+				ReasoningTokens int `json:"reasoning_tokens"`
+			} `json:"output_tokens_details"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(out, &resp); err != nil {
+		t.Fatalf("bad json: %v (%s)", err, out)
+	}
+	u := resp.Usage
+	if u.InputTokens != 1000 || u.OutputTokens != 9 || u.TotalTokens != 1009 {
+		t.Fatalf("usage envelope = %#v (%s)", u, out)
+	}
+	if u.InputDetails.CachedTokens != 960 || u.OutputDetails.ReasoningTokens != 3 {
+		t.Fatalf("usage details = %#v (%s)", u, out)
+	}
+}
+
+// 流式：缓存命中和思考 token 要从 message_start / message_delta 抄进来，
+// 否则 response.completed 的 usage 永远是 0 缓存、0 思考。
+func TestResponsesStreamUsageDetails(t *testing.T) {
+	rec := httptest.NewRecorder()
+	stream := newResponsesStream(rec, "glm")
+	for _, line := range []string{
+		`data: {"type":"message_start","message":{"usage":{"input_tokens":0,"cache_read_input_tokens":960}}}`,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`,
+		`data: {"type":"content_block_stop","index":0}`,
+		// 实测上游：message_start 的 input_tokens 是 0，真值在 message_delta。
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":40,"output_tokens":9,"output_tokens_details":{"reasoning_tokens":3}}}`,
+	} {
+		stream.feed(line + "\n")
+	}
+	stream.done()
+
+	if stream.usage.CacheReadTokens != 960 || stream.usage.ReasoningTokens != 3 {
+		t.Fatalf("stream usage = %#v", stream.usage)
+	}
+	var completed struct {
+		Response struct {
+			Usage struct {
+				InputTokens  int `json:"input_tokens"`
+				OutputTokens int `json:"output_tokens"`
+				TotalTokens  int `json:"total_tokens"`
+				InputDetails struct {
+					CachedTokens int `json:"cached_tokens"`
+				} `json:"input_tokens_details"`
+				OutputDetails struct {
+					ReasoningTokens int `json:"reasoning_tokens"`
+				} `json:"output_tokens_details"`
+			} `json:"usage"`
+		} `json:"response"`
+	}
+	var found bool
+	for _, line := range strings.Split(rec.Body.String(), "\n") {
+		payload := strings.TrimPrefix(strings.TrimSpace(line), "data: ")
+		if !strings.HasPrefix(payload, "{") || !strings.Contains(payload, `"type":"response.completed"`) {
+			continue
+		}
+		if err := json.Unmarshal([]byte(payload), &completed); err != nil {
+			t.Fatalf("bad completed event: %v (%s)", err, payload)
+		}
+		found = true
+	}
+	if !found {
+		t.Fatalf("no response.completed event:\n%s", rec.Body.String())
+	}
+	u := completed.Response.Usage
+	if u.InputTokens != 1000 || u.OutputTokens != 9 || u.TotalTokens != 1009 {
+		t.Fatalf("completed usage envelope = %#v", u)
+	}
+	if u.InputDetails.CachedTokens != 960 || u.OutputDetails.ReasoningTokens != 3 {
+		t.Fatalf("completed usage details = %#v", u)
+	}
+}
+
+// previous_response_id 我们展开不了（没有 response 存储），必须显式拒绝：
+// 静默忽略会让客户端以为历史带上了，实际只发了新的一段。
+func TestResponsesRejectsPreviousResponseID(t *testing.T) {
+	_, err := responsesRequestToAnthropic(map[string]any{
+		"input":                "hi",
+		"previous_response_id": "resp_123",
+	})
+	if err == nil || !strings.Contains(err.Error(), "previous_response_id") {
+		t.Fatalf("want explicit error, got %v", err)
+	}
+	// 空值不算「用了」这个特性，别拦。
+	if _, err := responsesRequestToAnthropic(map[string]any{
+		"input":                "hi",
+		"previous_response_id": "",
+	}); err != nil {
+		t.Fatalf("empty previous_response_id should pass: %v", err)
 	}
 }

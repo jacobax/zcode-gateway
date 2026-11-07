@@ -815,7 +815,15 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request, opts relayOptions
 		}
 		return
 	}
-	opts.writeUpstream(w, lastStatus, lastBody)
+	status := lastStatus
+	// 上游用 200 承载业务失败（比如所有号都没额度）：原样回 200 会让 OpenAI
+	// SDK 把错误体当成空回复，不抛异常。按业务码换成对应状态。
+	if status == http.StatusOK {
+		if mapped := businessErrorStatus(lastBody); mapped != 0 {
+			status = mapped
+		}
+	}
+	opts.writeUpstream(w, status, lastBody)
 }
 
 // relayStep 是一次尝试结束后的去向。

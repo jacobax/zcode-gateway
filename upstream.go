@@ -218,6 +218,28 @@ func (s *Server) ensureProjectToken(ctx context.Context, acc *Account) (string, 
 	return token, nil
 }
 
+// passthroughBetas 是实测上游接受、且缺了会掉能力的 anthropic-beta 能力位。
+// 上游对不认识的 beta 会直接 400，所以默认只放行白名单里的；排查时用
+// ZCODE_PASSTHROUGH_BETA=1 整串透传。
+var passthroughBetas = map[string]bool{
+	"mid-conversation-system": true,
+}
+
+// filterAnthropicBeta 只留下白名单里的 beta（输入是逗号分隔的一串）。
+func filterAnthropicBeta(value string) string {
+	if value == "" {
+		return ""
+	}
+	keep := make([]string, 0, 2)
+	for _, part := range strings.Split(value, ",") {
+		beta := strings.TrimSpace(part)
+		if beta != "" && passthroughBetas[beta] {
+			keep = append(keep, beta)
+		}
+	}
+	return strings.Join(keep, ",")
+}
+
 func (s *Server) Forward(ctx context.Context, acc *Account, body map[string]any, clientHeaders map[string]string, sessionKey string) (*fhttp.Response, []byte, error) {
 	return s.forward(ctx, acc, body, clientHeaders, false, sessionKey)
 }
@@ -232,11 +254,14 @@ func (s *Server) forward(ctx context.Context, acc *Account, body map[string]any,
 	for k, v := range body {
 		payload[k] = v
 	}
+	// 会话标识要稳定且两处同值：X-Session-Id 和 metadata 里的 session_id
+	// 是同一个值，上游才认得出「同一段对话」，前缀缓存才有机会命中。
+	sessionID := upstreamSessionID(sessionKey)
 	meta, _ := payload["metadata"].(map[string]any)
 	if meta == nil {
 		meta = map[string]any{}
 	}
-	meta["user_id"] = acc.User.ID
+	meta["user_id"] = upstreamUserID(acc, sessionID)
 	payload["metadata"] = meta
 	if override := strings.TrimSpace(os.Getenv("ZCODE_MODEL")); override != "" {
 		payload["model"] = override
@@ -247,15 +272,26 @@ func (s *Server) forward(ctx context.Context, acc *Account, body map[string]any,
 	// 模型清单：拉得到就钳 max_tokens、把 thinking_level 翻成上游认的路径。
 	s.ensureModelCatalog(acc)
 	applyModelCatalog(payload)
-	if s.store.Settings().Fingerprint && os.Getenv("ZCODE_SYSTEM_FINGERPRINT") != "0" {
-		mode := s.store.Settings().PromptMode
-		if mode == "replace" {
-			payload["system"] = cloneOfficialSystem()
-		} else if mode == "append" || acc.Mode == "start-plan" {
-			payload["system"] = withSystemFingerprint(payload["system"])
+	if systemShape317() {
+		// 3.17.2 形态自己重建 system/messages/metadata，和 fingerprint 路径互斥：
+		// 上游要求版本头与提示词成套，混着来必吃 3012。
+		dressSystem317(payload, acc, sessionID)
+	} else {
+		if s.store.Settings().Fingerprint && os.Getenv("ZCODE_SYSTEM_FINGERPRINT") != "0" {
+			mode := s.store.Settings().PromptMode
+			if mode == "replace" {
+				payload["system"] = cloneOfficialSystem()
+			} else if mode == "append" || acc.Mode == "start-plan" {
+				payload["system"] = withSystemFingerprint(payload["system"])
+			}
+		}
+		payload["system"] = mergeClientSystem(payload["system"])
+		// 三块形态开关：只在 fingerprint 路径生效（没有 head/prefix 时补第三块
+		// 没有意义，反而会把官方 harness 文案塞给不用 fingerprint 的客户端）。
+		if systemShapeThreeBlocks() && hasFingerprint(systemBlocks(payload["system"])) {
+			payload["system"] = withThreeSystemBlocks(systemBlocks(payload["system"]))
 		}
 	}
-	payload["system"] = mergeClientSystem(payload["system"])
 	// 前缀缓存路由键：默认关闭，见 promptCacheKeyFor 的说明。
 	if os.Getenv("ZCODE_PROMPT_CACHE_KEY") == "1" {
 		if _, exists := payload["prompt_cache_key"]; !exists {
@@ -308,16 +344,25 @@ func (s *Server) forward(ctx context.Context, acc *Account, body map[string]any,
 	headers["X-Request-Id"] = randomUUID()
 	headers["X-ZCode-Session-Type"] = "main"
 	headers["X-ZCode-Trace-Id"] = randomUUID()
-	headers["X-Query-Id"] = "01" + randomHex(11)
+	headers["X-Query-Id"] = uuidV7()
 	headers["X-ZCode-Query-Source"] = "main_turn"
-	headers["X-Session-Id"] = "session_" + randomHex(16)
+	headers["X-Session-Id"] = sessionID
 	if stream {
 		headers["Accept"] = "text/event-stream"
 	} else {
 		headers["Accept"] = "application/json"
 	}
-	if beta := clientHeaders["anthropic-beta"]; beta != "" && os.Getenv("ZCODE_PASSTHROUGH_BETA") == "1" {
+	// anthropic-beta：默认只透传白名单里的能力位，其余丢弃（上游对不认识的
+	// beta 会 400）。ZCODE_PASSTHROUGH_BETA=1 时整串透传，用于排查。
+	beta := filterAnthropicBeta(clientHeaders["anthropic-beta"])
+	if os.Getenv("ZCODE_PASSTHROUGH_BETA") == "1" {
+		beta = strings.TrimSpace(clientHeaders["anthropic-beta"])
+	}
+	if beta != "" {
 		headers["Anthropic-Beta"] = beta
+	}
+	if systemShape317() {
+		applyHeaders317(headers, acc)
 	}
 	if acc.Mode == "coding-plan" && acc.ZcodeJWT != "" {
 		headers["X-Zcode-Authorization"] = "Bearer " + acc.ZcodeJWT
@@ -365,6 +410,45 @@ func cloneOfficialSystem() []any {
 		out = append(out, clone)
 	}
 	return out
+}
+
+// systemShapeThreeBlocks 是「system 恰好 3 块」形态的开关（ZCODE_SYSTEM_SHAPE=3）。
+//
+// 背景：三家独立复刻都指出上游 harness 的 system 骨架恰好 3 块，客户端 system
+// 并入末块。我们的 fingerprint 路径在客户端带 system 时本来就是 3 块，只有
+// 「客户端没带 system」时是 2 块——实测这个形态 start-plan 也能跑通（2026-11-07），
+// 所以默认关闭，等真的看到 3012/405 再开。
+func systemShapeThreeBlocks() bool {
+	return strings.TrimSpace(os.Getenv("ZCODE_SYSTEM_SHAPE")) == "3"
+}
+
+// officialHarnessTail 取官方 system 第 3 块里与机器无关的部分。
+// "# Environment" 之后是工作目录/平台/OS 版本，抄过来会告诉模型一个假环境，
+// 所以从那里截断。
+func officialHarnessTail() string {
+	if len(officialSystemBlocks) < 3 {
+		return ""
+	}
+	text := blockText(officialSystemBlocks[2])
+	if idx := strings.Index(text, "\n# Environment"); idx > 0 {
+		text = text[:idx]
+	}
+	return strings.TrimSpace(text)
+}
+
+// withThreeSystemBlocks 在只有 [head, prefix] 时补上第三块，凑成官方骨架。
+// 已经有 3 块（客户端 system 已并入末块）就原样返回。
+func withThreeSystemBlocks(blocks []any) []any {
+	if len(blocks) >= 3 {
+		return blocks
+	}
+	tail := officialHarnessTail()
+	if tail == "" {
+		return blocks
+	}
+	out := make([]any, 0, len(blocks)+1)
+	out = append(out, blocks...)
+	return append(out, map[string]any{"type": "text", "text": tail})
 }
 
 // mergeClientSystem folds multiple client system blocks into one block.

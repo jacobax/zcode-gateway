@@ -44,6 +44,8 @@ func (s *Server) refreshAllQuotas(ctx context.Context) {
 		spawned++
 		go func() {
 			defer func() { <-sem; done <- struct{}{} }()
+			// panic 兜底：一个号的额度响应畸形不该把整个网关带走。
+			defer guardPanic("refreshQuota")
 			_ = s.refreshQuota(ctx, acc)
 		}()
 	}

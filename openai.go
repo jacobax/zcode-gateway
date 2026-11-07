@@ -107,6 +107,11 @@ func openAIRequestToAnthropic(body map[string]any) (map[string]any, error) {
 	if len(messages) == 0 {
 		return nil, errors.New("request body requires at least one user message")
 	}
+	// response_format 是 OpenAI 特有的，上游没有对应字段：翻成一条 system
+	// 指令追加在客户端 system 之后，否则要 JSON 的客户端会拿到散文。
+	if instruction := openAIResponseFormatInstruction(body["response_format"]); instruction != "" {
+		system = append(system, instruction)
+	}
 	if len(system) > 0 {
 		out["system"] = strings.Join(system, "\n\n")
 	}
@@ -149,8 +154,45 @@ func openAIRequestToAnthropic(body map[string]any) (map[string]any, error) {
 			}
 		}
 	}
+	// reasoning_effort 只在 chat 里出现；翻成内部档位，由 applyModelCatalog
+	// 落成上游认的 output_config.effort。
+	if level := reasoningLevelFromBody(body); level != "" {
+		out["thinking_level"] = level
+	}
+	// 客户端点的模型必须带给上游：forward 只在缺失时才回落 Flash，而
+	// applyModelCatalog 也要靠 model 才能钳 max_tokens、翻译思考档位。
+	if model, ok := body["model"].(string); ok && model != "" {
+		out["model"] = model
+	}
 	out["stream"], _ = body["stream"].(bool)
 	return out, nil
+}
+
+// openAIResponseFormatInstruction 把 response_format 翻成 system 指令。
+// json_schema 要把 schema 原文带上，模型才知道字段名和类型；schema 缺失时
+// 退化成「输出合法 JSON」，别因为客户端少给一个字段就整轮 400。
+func openAIResponseFormatInstruction(format any) string {
+	value, ok := format.(map[string]any)
+	if !ok {
+		return ""
+	}
+	kind, _ := value["type"].(string)
+	switch kind {
+	case "json_object":
+		return "只输出一个合法的 JSON 对象。不要输出解释、Markdown 代码块标记或任何前后缀文本。"
+	case "json_schema":
+		spec, _ := value["json_schema"].(map[string]any)
+		raw, err := json.Marshal(spec["schema"])
+		if err != nil || len(raw) == 0 || string(raw) == "null" {
+			return "只输出一个合法的 JSON 对象。不要输出解释、Markdown 代码块标记或任何前后缀文本。"
+		}
+		prefix := "只输出一个符合下面 JSON Schema 的 JSON 对象，不要输出解释或 Markdown 代码块标记。"
+		if name := firstString(spec["name"]); name != "" {
+			prefix = "只输出一个符合下面 JSON Schema 的 JSON 对象（schema 名 " + name + "），不要输出解释或 Markdown 代码块标记。"
+		}
+		return prefix + "\n\n" + string(raw)
+	}
+	return ""
 }
 
 // openAIText 取文本内容，兼容 string 与 [{type:text,text:...}] 两种写法。
@@ -301,8 +343,9 @@ func anthropicToOpenAIResponse(data []byte, model string) ([]byte, Usage, error)
 		} `json:"content"`
 		StopReason string `json:"stop_reason"`
 		Usage      struct {
-			InputTokens  int `json:"input_tokens"`
-			OutputTokens int `json:"output_tokens"`
+			InputTokens     int `json:"input_tokens"`
+			OutputTokens    int `json:"output_tokens"`
+			CacheReadTokens int `json:"cache_read_input_tokens"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(data, &payload); err != nil {
@@ -333,9 +376,14 @@ func anthropicToOpenAIResponse(data []byte, model string) ([]byte, Usage, error)
 		}
 	}
 	usage := Usage{
-		InputTokens:  payload.Usage.InputTokens,
-		OutputTokens: payload.Usage.OutputTokens,
+		InputTokens:     payload.Usage.InputTokens,
+		OutputTokens:    payload.Usage.OutputTokens,
+		CacheReadTokens: payload.Usage.CacheReadTokens,
 	}
+	// OpenAI 的 prompt_tokens 含缓存命中，cached_tokens 是它的子集；
+	// Anthropic 的 input_tokens 不含缓存，所以这里补上，否则全缓存命中
+	// 时客户端会看到 prompt_tokens=0。
+	promptTokens := usage.InputTokens + usage.CacheReadTokens
 	out := map[string]any{
 		"id":      firstNonEmpty(payload.ID, "chatcmpl-"+randomHex(12)),
 		"object":  "chat.completion",
@@ -347,9 +395,10 @@ func anthropicToOpenAIResponse(data []byte, model string) ([]byte, Usage, error)
 			"finish_reason": openAIFinishReason(payload.StopReason, len(toolCalls) > 0),
 		}},
 		"usage": map[string]any{
-			"prompt_tokens":     usage.InputTokens,
-			"completion_tokens": usage.OutputTokens,
-			"total_tokens":      usage.InputTokens + usage.OutputTokens,
+			"prompt_tokens":         promptTokens,
+			"completion_tokens":     usage.OutputTokens,
+			"total_tokens":          promptTokens + usage.OutputTokens,
+			"prompt_tokens_details": map[string]any{"cached_tokens": usage.CacheReadTokens},
 		},
 	}
 	encoded, err := json.Marshal(out)
@@ -443,12 +492,14 @@ func (s *openAIStream) feed(line string) bool {
 		// message_start 的 usage 嵌在 message 里，不在事件顶层。
 		Message struct {
 			Usage struct {
-				InputTokens int `json:"input_tokens"`
+				InputTokens     int `json:"input_tokens"`
+				CacheReadTokens int `json:"cache_read_input_tokens"`
 			} `json:"usage"`
 		} `json:"message"`
 		Usage struct {
-			InputTokens  int `json:"input_tokens"`
-			OutputTokens int `json:"output_tokens"`
+			InputTokens     int `json:"input_tokens"`
+			OutputTokens    int `json:"output_tokens"`
+			CacheReadTokens int `json:"cache_read_input_tokens"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal([]byte(payload), &event); err != nil {
@@ -457,8 +508,11 @@ func (s *openAIStream) feed(line string) bool {
 	produced := false
 	switch event.Type {
 	case "message_start":
-		if event.Message.Usage.InputTokens > 0 {
-			s.usage.InputTokens = event.Message.Usage.InputTokens
+		if v := event.Message.Usage.InputTokens; v > 0 {
+			s.usage.InputTokens = v
+		}
+		if v := event.Message.Usage.CacheReadTokens; v > 0 {
+			s.usage.CacheReadTokens = v
 		}
 	case "content_block_start":
 		if event.ContentBlock.Type == "tool_use" {
@@ -486,8 +540,16 @@ func (s *openAIStream) feed(line string) bool {
 			}
 		}
 	case "message_delta":
-		if event.Usage.OutputTokens > 0 {
-			s.usage.OutputTokens = event.Usage.OutputTokens
+		// 实测 GLM 的 message_start 里 input_tokens 恒为 0，真实 prompt 长度
+		// 在 message_delta 才给，所以这里也要接。
+		if v := event.Usage.InputTokens; v > 0 {
+			s.usage.InputTokens = v
+		}
+		if v := event.Usage.OutputTokens; v > 0 {
+			s.usage.OutputTokens = v
+		}
+		if v := event.Usage.CacheReadTokens; v > 0 {
+			s.usage.CacheReadTokens = v
 		}
 		if event.Delta.StopReason != "" {
 			s.chunk(map[string]any{}, openAIFinishReason(event.Delta.StopReason, s.toolIdx > 0))

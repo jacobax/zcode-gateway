@@ -320,6 +320,35 @@ TLS）→ CONNECT → 对目标再做一次 TLS → 发 `GET /api/v1/client/conf
 
     务必只留一个号：网关的重试循环会把 3012 扩散到池子里的其他账号。
 
+    2026-11-07 又验了一遍 3.17.2（干净池、只导 10 个号）：3.16.3 基线两次 200，
+    只开 3 块 system 形态两次 200，**只把版本改成 3.17.2 立刻 405/3012**，之后池子
+    全进 15 分钟冷却。同一天也确认「2 块 system」本身不触发 3012——之前怀疑的形态
+    问题在 start-plan 上不成立，所以 `ZCODE_SYSTEM_SHAPE=3` 只作为灰度开关保留，默认关。
+
+    **但 3.17.2 本身是可行的**：同一天在 aws3 上跑 7sen1ot/zcode2api（v1.6.1）和
+    gakiyukr/zcode2api-plus（v2.1.0）——两家内嵌的 `zcode_system.json` 是同一份官方
+    3.17.2 提示词（首块 `You are ZCode, an interactive agent`，注意没有 "coding"），
+    zcode2api-plus 跳过它自己的验证码门槛后，用 3.17.2 全套形态 + 真实 JWT 拿到 200
+    （input_tokens 1079）。把它的 `ZCODE_CLIENT_VERSION` 改回 3.16.3 再打，同一个号
+    立刻 3012。结论：**版本号和提示词形态是绑定的，必须整套一起换**，单独改版本号
+    必吃 3012。要升 3.17.2 就得把三段提示词、身份头（X-ZCode-Agent / HTTP-Referer /
+    X-Title / X-Release-Channel / X-Client-Language / X-Timezone / X-Platform /
+    X-Os-Category / X-Os-Version）、UA（`ZCode/3.17.2 ai-sdk/anthropic/3.0.81`）和首个
+    user turn 前的日期 reminder 一起搬过来。
+
+    另一个坑：zcode2api-plus 对 `mode=jwt` 的账号**强制先解验证码**（`needsCaptcha :=
+    acc.Mode == "jwt"`），没有浏览器求解器就直接 503 `captcha_required`、根本不发上游。
+    所以拿它做形态验证必须先跳掉这一步，否则看到的 503 是它自己的门槛，不是上游拒绝。
+
+    本仓库已按这套形态实现，开关 `ZCODE_SYSTEM_SHAPE=317`：提示词在
+    `zcode317_prompt.json`（逐字节照抄 MIT 来源），`zcode317.go` 负责三块拼装、
+    日期 reminder、cache_control 重排和官方 CLI 身份头，`appVersion` 在没显式
+    指定时自动跟着切 3.17.2。aws3 单账号灰度：3.16.3 基线 `input_tokens=257`、
+    两次 200；切 317 后版本变 3.17.2、两次 200、`input_tokens=1076`（与
+    zcode2api-plus 的 1079 同一量级，差异来自 environment 段和日期）。
+    **默认关**：换默认值前必须再走一遍单账号 A/B——提示词整段换掉会改变所有
+    客户端的模型行为，不是纯兼容性开关。
+
 11. **活动接口的客户端版本要跟着官方发版走**。2026-11-03 实测：同一账号同一套头，只改
     `app_version`——`3.15.0`/`3.16.3`/`3.16.4`/`3.17.0` 全部 `deliveries:[]` +
     领取回 `1004`，`3.17.1`/`3.18.0` 才有横幅、领取才 200。写死一个版本号，上游抬一次
@@ -353,9 +382,11 @@ TLS）→ CONNECT → 对目标再做一次 TLS → 发 `GET /api/v1/client/conf
     等于一次人机校验续期就把健康号停用 30 分钟。现在验证码判定排在状态码之前，
     头、3007、文案三条证据任一条命中都按「换码重试」处理。
 
-16. **流式请求的 `input_tokens` 上游恒为 0**。`message_start` 里就是
-    `{"input_tokens":0,"output_tokens":0}`，同一次请求非流式才给真实值
-    （实测 260 vs 0）。别拿流式 usage 去算成本，会系统性少记。
+16. **流式请求的 `input_tokens` 不在 `message_start`**。那里恒为
+    `{"input_tokens":0,"output_tokens":0}`，真实值（实测 258）在最后的
+    `message_delta.usage` 里。任何新写的流式 usage 解析都得从 `message_delta`
+    取 `input_tokens`，否则成本系统性少记——`/v1/responses` 和
+    `/v1/chat/completions` 的翻译器 2026-11-07 才补上。
 
 17. **`prompt_cache_key` 默认关闭**（`ZCODE_PROMPT_CACHE_KEY=1` 才开）。业界实测
     这个字段能把 8k 前缀的缓存命中率从 0 拉到 7808 token（费用差约 17 倍），
@@ -385,6 +416,36 @@ TLS）→ CONNECT → 对目标再做一次 TLS → 发 `GET /api/v1/client/conf
     现在参数在创建 store 之前处理：`-v/--version`、`-h/--help`，其余一律
     拒绝启动（exit 2）。排查「端口被占 / 账号数为 0」时先看 `ss -ltnp`，
     别假设只有一个实例在跑。
+
+22. **OpenAI 兼容端点曾经不把 `model` 带给上游**。`openAIRequestToAnthropic` /
+    `responsesRequestToAnthropic` 只翻消息体，`model` 一直是空的，`forward()`
+    于是回落到 `GLM-5.3-Flash`：客户端点 `GLM-5.3` 实际跑的是 Flash，模型清单
+    的 `max_tokens` 钳制和思考档位翻译也全都失效（`applyModelCatalog` 靠
+    `model` 找清单）。2026-11-07 修，两个转换器都显式带上 `model`，端到端
+    测试断言上游收到的是客户端点的那个。
+
+23. **`metadata.user_id` 是 JSON blob，且前缀缓存跟会话 id 无关**。官方客户端的
+    形状是 `{"device_id","account_uuid","session_id"}`，上游接受（2026-11-07 实测
+    200）。但缓存命中是**按内容**算的：同一个 8.8k 字符 system 前缀，换会话头、
+    甚至不带会话头，第二次起都是 `cache_read_input_tokens=5248 / input_tokens=5262`。
+    所以别把缓存命中率归因于 `X-Session-Id` 稳定化——它的作用是让上游认出
+    「同一段对话」，不是缓存的开关。
+
+24. **`UpdateSettings` 先写盘、失败回滚内存**。原来是「改内存 → 尽力落盘 → 忽略
+    错误」：写失败时界面显示改成功、进程按新值跑，重启后又变回旧值，看起来像
+    设置随机丢失。现在落盘失败就回滚并记日志，等于这次修改没发生。
+
+25. **上游不拒未知 `anthropic-beta`，但我们仍按白名单透传**。2026-11-07 实测：
+    `totally-made-up-beta` 在 `ZCODE_PASSTHROUGH_BETA=1` 下也是 200，所以白名单
+    不是防 400，而是防「把客户端的能力开关原样转发、我们却兑现不了语义」。
+    目前放行 `mid-conversation-system`；同一天验证带不带这个 beta、中途 system
+    轮次都是 200，说明上游对这块比较宽松。
+
+26. **业务错误要换成真实状态码**。上游用 HTTP 200 承载 `{"code":1005}` 这类失败，
+    池子里所有号都试过仍失败时，原来把 200 原样回给客户端——OpenAI SDK 会把错误
+    体当成空回复，连异常都不抛，排障时只看到「模型不说话」。现在按业务码映射：
+    额度/限流/模型并发 → 429，风控/会话过期 → 502。实测没额度的号三个端点都从
+    `200 + {"code":...}` 变成 `429`，错误消息保留。
 
 ## 出口 IP 与风控
 

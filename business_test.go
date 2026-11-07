@@ -73,3 +73,29 @@ func TestQuotaExhaustedCodesCoverage(t *testing.T) {
 		}
 	}
 }
+
+// 池子耗尽后仍按 200 回业务错误，OpenAI SDK 会当成空回复；状态必须映射。
+func TestBusinessErrorStatus(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want int
+	}{
+		{name: "1005 额度用完", body: `{"code":1005,"msg":"exceed quota limit"}`, want: 429},
+		{name: "1308 用量上限", body: `{"code":1308,"msg":"usage limit reached"}`, want: 429},
+		{name: "3009 模型并发", body: `{"code":3009,"msg":"model busy"}`, want: 429},
+		{name: "3012 风控", body: `{"code":3012,"msg":"account or network abnormal"}`, want: 502},
+		{name: "3004 会话过期", body: `{"code":3004,"msg":"session expired"}`, want: 502},
+		// 不是业务错误：调用方保持原状态。
+		{name: "正常 message", body: `{"type":"message","content":[{"type":"text","text":"hi"}]}`},
+		{name: "正常 code 0", body: `{"code":0,"msg":"ok"}`},
+		{name: "未知码", body: `{"code":9999,"msg":"who knows"}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := businessErrorStatus([]byte(c.body)); got != c.want {
+				t.Fatalf("status = %d, want %d", got, c.want)
+			}
+		})
+	}
+}

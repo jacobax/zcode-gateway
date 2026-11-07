@@ -93,13 +93,14 @@ func TestAnthropicToOpenAIResponse(t *testing.T) {
 			{"type":"tool_use","id":"toolu_1","name":"weather","input":{"city":"北京"}}
 		],
 		"stop_reason":"tool_use",
-		"usage":{"input_tokens":11,"output_tokens":7}
+		"usage":{"input_tokens":11,"output_tokens":7,"cache_read_input_tokens":89}
 	}`)
 	out, usage, err := anthropicToOpenAIResponse(raw, "GLM-5.3")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if usage.InputTokens != 11 || usage.OutputTokens != 7 {
+	// 缓存命中的 89 也要带回来：DB 侧分开记，但客户端只看 prompt_tokens。
+	if usage.InputTokens != 11 || usage.OutputTokens != 7 || usage.CacheReadTokens != 89 {
 		t.Fatalf("usage lost: %#v", usage)
 	}
 	var parsed struct {
@@ -118,7 +119,11 @@ func TestAnthropicToOpenAIResponse(t *testing.T) {
 			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
 		Usage struct {
-			TotalTokens int `json:"total_tokens"`
+			PromptTokens  int `json:"prompt_tokens"`
+			TotalTokens   int `json:"total_tokens"`
+			PromptDetails struct {
+				CachedTokens int `json:"cached_tokens"`
+			} `json:"prompt_tokens_details"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(out, &parsed); err != nil {
@@ -140,8 +145,12 @@ func TestAnthropicToOpenAIResponse(t *testing.T) {
 	if call.Function.Name != "weather" || !strings.Contains(call.Function.Arguments, "北京") {
 		t.Fatalf("tool call payload wrong: %#v", call)
 	}
-	if parsed.Usage.TotalTokens != 18 {
-		t.Fatalf("total_tokens should be input+output: %#v", parsed.Usage)
+	// OpenAI 口径：prompt_tokens 含缓存命中（11+89），cached_tokens 是其子集。
+	if parsed.Usage.PromptTokens != 100 || parsed.Usage.TotalTokens != 107 {
+		t.Fatalf("prompt_tokens should include cache hits: %#v", parsed.Usage)
+	}
+	if parsed.Usage.PromptDetails.CachedTokens != 89 {
+		t.Fatalf("cached_tokens lost: %#v", parsed.Usage)
 	}
 }
 
@@ -150,11 +159,12 @@ func TestOpenAIStreamTranslation(t *testing.T) {
 	stream := newOpenAIStream(rec, "GLM-5.3")
 	lines := []string{
 		`event: message_start`,
-		`data: {"type":"message_start","message":{"usage":{"input_tokens":9}}}`,
+		// 实测上游：message_start 的 input_tokens 是 0，真值在 message_delta。
+		`data: {"type":"message_start","message":{"usage":{"input_tokens":0,"cache_read_input_tokens":21}}}`,
 		`data: {"type":"content_block_start","content_block":{"type":"text"}}`,
 		`data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"你"}}`,
 		`data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"好"}}`,
-		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":4}}`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":9,"output_tokens":4}}`,
 		`data: {"type":"message_stop"}`,
 	}
 	produced := 0
@@ -178,7 +188,7 @@ func TestOpenAIStreamTranslation(t *testing.T) {
 	if !strings.HasSuffix(strings.TrimSpace(body), "data: [DONE]") {
 		t.Fatalf("stream should end with [DONE]:\n%s", body)
 	}
-	if stream.usage.InputTokens != 9 || stream.usage.OutputTokens != 4 {
+	if stream.usage.InputTokens != 9 || stream.usage.OutputTokens != 4 || stream.usage.CacheReadTokens != 21 {
 		t.Fatalf("stream usage not captured: %#v", stream.usage)
 	}
 }
@@ -234,6 +244,9 @@ func TestChatCompletionsEndToEnd(t *testing.T) {
 			t.Fatalf("upstream did not receive anthropic messages: %#v", seen)
 		}
 	}
+	if seen["model"] != "GLM-5.3" {
+		t.Fatalf("client model not forwarded upstream: %#v", seen["model"])
+	}
 	if _, ok := seen["max_tokens"]; !ok {
 		t.Fatalf("max_tokens missing in upstream request: %#v", seen)
 	}
@@ -250,5 +263,56 @@ func TestChatCompletionsEndToEnd(t *testing.T) {
 	}
 	if parsed.Object != "chat.completion" || parsed.Choices[0].Message.Content != "你好" {
 		t.Fatalf("unexpected OpenAI response: %s", rec.Body.String())
+	}
+}
+
+// response_format 上游没有对应字段，要翻成 system 指令：否则要 JSON 的客户端
+// 会拿到散文，Cursor / LangChain 这类直接解析失败。
+func TestOpenAIResponseFormatInstruction(t *testing.T) {
+	chat, err := openAIRequestToAnthropic(map[string]any{
+		"model": "GLM-5.3",
+		"messages": []any{
+			map[string]any{"role": "system", "content": "be brief"},
+			map[string]any{"role": "user", "content": "hi"},
+		},
+		"response_format": map[string]any{"type": "json_object"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	system, _ := chat["system"].(string)
+	if !strings.Contains(system, "be brief") || !strings.Contains(system, "JSON") {
+		t.Fatalf("system should keep client text and append the JSON instruction: %q", system)
+	}
+
+	// json_schema 要把 schema 原文带上，模型才知道字段名和类型。
+	chat, err = openAIRequestToAnthropic(map[string]any{
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+		"response_format": map[string]any{
+			"type": "json_schema",
+			"json_schema": map[string]any{
+				"name":   "person",
+				"schema": map[string]any{"type": "object", "properties": map[string]any{"name": map[string]any{"type": "string"}}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	system, _ = chat["system"].(string)
+	if !strings.Contains(system, "person") || !strings.Contains(system, `"properties"`) {
+		t.Fatalf("schema not embedded: %q", system)
+	}
+
+	// type=text（或压根没带）时不要凭空加 system。
+	chat, err = openAIRequestToAnthropic(map[string]any{
+		"messages":        []any{map[string]any{"role": "user", "content": "hi"}},
+		"response_format": map[string]any{"type": "text"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := chat["system"]; exists {
+		t.Fatalf("text response_format should not add system: %#v", chat)
 	}
 }

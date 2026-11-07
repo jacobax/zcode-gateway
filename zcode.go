@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -112,6 +113,39 @@ func randomHex(n int) string {
 func randomUUID() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// uuidV7 生成 RFC 9562 的 v7 UUID：前 48 位是毫秒时间戳，其余随机。
+// 官方客户端的 x-query-id 就是这个形状；上游若按前缀排序或分片，v4 的
+// 随机前缀排不出时间序，同一个客户端的历史会被打散。
+func uuidV7() string {
+	var b [16]byte
+	ms := uint64(time.Now().UnixMilli())
+	b[0] = byte(ms >> 40)
+	b[1] = byte(ms >> 32)
+	b[2] = byte(ms >> 24)
+	b[3] = byte(ms >> 16)
+	b[4] = byte(ms >> 8)
+	b[5] = byte(ms)
+	if _, err := rand.Read(b[6:]); err != nil {
+		// 随机源不可用时退回 v4：形状仍然合法，只是丢了时间序。
+		return randomUUID()
+	}
+	b[6] = (b[6] & 0x0f) | 0x70 // version 7
+	b[8] = (b[8] & 0x3f) | 0x80 // variant RFC 4122
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// uuidFromHash 把任意字符串确定性地映射成 UUID 形状的标识。
+// 用途：会话 id 要「同一会话恒定」，又不能把原文（可能含对话内容派生的键）
+// 直接发给上游。
+func uuidFromHash(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	var b [16]byte
+	copy(b[:], sum[:16])
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])

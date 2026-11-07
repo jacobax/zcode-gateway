@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"math/rand/v2"
 	"net/http"
 	"os"
@@ -498,6 +499,39 @@ func sessionKey(value string) string {
 	}
 	sum := sha256.Sum256([]byte(value))
 	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// upstreamSessionID 给这次请求一个稳定的上游会话标识：同一个会话永远得到
+// 同一个 id，上游的前缀缓存才有机会命中。之前每请求随机，缓存基本失效。
+// 拿不到会话信息时退回随机——宁可缓存不命中，也不要把不相关的对话混成
+// 一个会话（会把不同用户的内容拼到同一段前缀里）。
+func upstreamSessionID(key string) string {
+	if key == "" {
+		return randomUUID()
+	}
+	return uuidFromHash("zcg-session\x00" + key)
+}
+
+// upstreamUserID 是 metadata.user_id 的值：官方客户端发的是 JSON blob
+// {"device_id","account_uuid","session_id"}，上游按它做设备/会话维度统计。
+// 我们之前只发裸 user id，形状和官方对不上。
+func upstreamUserID(acc *Account, sessionID string) string {
+	if acc == nil {
+		return ""
+	}
+	device := acc.DeviceMid
+	if acc.Profile != nil && acc.Profile.DeviceMid != "" {
+		device = acc.Profile.DeviceMid
+	}
+	blob, err := json.Marshal(map[string]string{
+		"device_id":    device,
+		"account_uuid": acc.User.ID,
+		"session_id":   sessionID,
+	})
+	if err != nil {
+		return acc.User.ID
+	}
+	return string(blob)
 }
 
 // minDerivedSessionChars 是内容派生会话键的最小首条消息长度。

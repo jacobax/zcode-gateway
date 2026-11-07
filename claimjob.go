@@ -16,9 +16,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -347,6 +349,20 @@ func (s *Server) startClaimJob(accountIDs []string) error {
 	job.mu.Unlock()
 
 	go func() {
+		// 后台任务崩了也要把 job 收尾：否则面板永远显示「运行中」，
+		// 再点领取会被 running 判断挡回去。
+		defer func() {
+			r := recover()
+			if r == nil {
+				return
+			}
+			log.Printf("claimJob panic: %v\n%s", r, debug.Stack())
+			job.logf("任务异常中止：%v", r)
+			job.mu.Lock()
+			job.running = false
+			job.finished = time.Now().Unix()
+			job.mu.Unlock()
+		}()
 		ctx := context.Background()
 		job.logf("开始领取，共 %d 个账号", len(targets))
 		gap := claimGap()

@@ -30,11 +30,17 @@
 | `POST /v1/chat/completions` | OpenAI Chat Completions | OpenAI SDK、Cursor、各类兼容工具 |
 | `POST /v1/responses` | OpenAI Responses | Codex CLI 及只认 Responses 形状的客户端 |
 | `GET /v1/models` | 模型列表（跟随上游 `client/configs`，带 `context_window` / `max_output_tokens`） | — |
+| `POST /v1/messages/count_tokens` | token 预估（本地估算，不打上游） | Claude Code 的上下文管理 |
 | `GET /health` | 存活探测（含账号数、在途请求、构建版本、活动客户端版本） | systemd / 监控 |
 | `GET /metrics` | Prometheus 指标（账号池状态、额度、按模型用量） | Prometheus / Grafana |
 
 鉴权：面板里设了「代理 Token」后，所有入口都要带 `Authorization: Bearer <token>`
 或 `x-api-key: <token>`；留空表示本机免鉴权（只建议在回环地址上这么做）。
+
+`/v1/chat/completions` 支持 `response_format`（`json_object` / `json_schema`）：上游没有
+这个字段，网关把它翻成一条 system 指令（`json_schema` 会把 schema 原文带上）。
+`/v1/responses` 的 `previous_response_id` 不支持——我们不存 response 对象，展开不了，
+会直接回 400，请改发完整 `input`。
 
 ```bash
 # Anthropic 风格
@@ -74,6 +80,12 @@ curl -s http://127.0.0.1:8787/v1/messages \
 实测同一道题：`low` 思考 12 字符 / 243 输出 token，`high` 20 / 267，
 `max` 690 / 514。网关把它翻译成上游的 `output_config.effort`，路径来自
 `client/configs` 的 `reasoning.levels`——上游改结构时跟着变。
+
+OpenAI 兼容入口用各自的原生写法，词表收敛到同一套三档：
+`/v1/chat/completions` 的 `reasoning_effort`、`/v1/responses` 的
+`reasoning.effort`——`minimal`/`low` → `low`，`medium`/`high` → `high`，
+`max` → `max`；`none` 和认不出来的值不设置（走模型默认），避免把上游
+不认的档位写进 `output_config`。
 
 客户端自己带了 `output_config` 时网关不覆盖。
 
@@ -149,7 +161,9 @@ go build -trimpath -ldflags="-s -w" -o zcode-gateway .
 | `ZCODE_GATEWAY_ADDR` | `127.0.0.1:8787` | 监听地址，生产建议只绑回环 |
 | `ZCODE_GATEWAY_DATA` | `data` | 数据目录（`accounts.json`、`master.key`、`gateway.db`） |
 | `ZCODE_ADMIN_PASSWORD` | 随机生成 | 面板密码**初始值**；面板里改过后以面板为准 |
-| `ZCODE_APP_VERSION` | `3.16.3` | 模拟的 ZCode 客户端版本（UA 与 `X-ZCode-App-Version` 等身份头都取它）。**升级前必须做单账号 A/B 验证**，见 `OPERATIONS.md` 第 10 条坑 |
+| `ZCODE_APP_VERSION` | `3.16.3` | 模拟的 ZCode 客户端版本（UA 与 `X-ZCode-App-Version` 等身份头都取它）。**升级前必须做单账号 A/B 验证**：2026-11-07 实测 3.17.2 直接吃 405/3012，见 `OPERATIONS.md` 第 10 条坑 |
+| `ZCODE_SYSTEM_SHAPE` | 空 | `3`：把 system 补成 3 块（客户端没带 system 时补官方 harness 文案）；`317`：整套切到 ZCode 3.17.2 形态（三段官方提示词 + 官方 CLI 身份头 + 版本号自动 3.17.2），实测 200，默认关。详见 `OPERATIONS.md` 第 10 条 |
+| `ZCODE_PASSTHROUGH_BETA` | 空 | 设成 `1` 时把客户端的 `anthropic-beta` 整串透传（排查用）；默认只放行白名单（`mid-conversation-system`） |
 | `ZCODE_UPSTREAM` | 空 | 覆盖**模型转发端点**的整条 URL（端到端测试用它指向 httptest）；不影响额度/活动/OAuth |
 | `ZCODE_UPSTREAM_BASE` | `https://zcode.z.ai` | 额度/活动/OAuth 这一族接口的根地址，自建镜像时改它 |
 | `ZCODE_PROXY_URL_CLAIM` | 空 | 只给领取/活动用的出口（通常指向本地中继） |

@@ -181,3 +181,64 @@ func resetCatalogForTest() {
 	catalogModels = map[string]*catalogModel{}
 	catalogMu.Unlock()
 }
+
+// reasoning_effort / reasoning.effort 要收敛成上游认的 low/high/max，
+// 并经由 applyModelCatalog 落成 output_config.effort。
+func TestReasoningEffortMapping(t *testing.T) {
+	cases := map[string]string{
+		"minimal": "low", "low": "low", "LOW": "low",
+		"medium": "high", "high": "high", "max": "max",
+		"none": "", "": "", "turbo": "",
+	}
+	for input, want := range cases {
+		if got := normalizeReasoningLevel(input); got != want {
+			t.Fatalf("normalizeReasoningLevel(%q) = %q, want %q", input, got, want)
+		}
+	}
+
+	chat, err := openAIRequestToAnthropic(map[string]any{
+		"model":            "GLM-5.3",
+		"messages":         []any{map[string]any{"role": "user", "content": "hi"}},
+		"reasoning_effort": "medium",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chat["thinking_level"] != "high" {
+		t.Fatalf("chat reasoning_effort not mapped: %#v", chat)
+	}
+	if chat["model"] != "GLM-5.3" {
+		t.Fatalf("chat model not propagated upstream: %#v", chat)
+	}
+
+	resp, err := responsesRequestToAnthropic(map[string]any{
+		"model":     "GLM-5.3",
+		"input":     "hi",
+		"reasoning": map[string]any{"effort": "minimal"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp["thinking_level"] != "low" {
+		t.Fatalf("responses reasoning.effort not mapped: %#v", resp)
+	}
+
+	// effort=none 不设档位，走模型默认。
+	none, err := responsesRequestToAnthropic(map[string]any{
+		"input":     "hi",
+		"reasoning": map[string]any{"effort": "none"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := none["thinking_level"]; exists {
+		t.Fatalf("effort=none should not set a level: %#v", none)
+	}
+
+	// 转换出来的档位要能被 applyModelCatalog 落成上游字段。
+	resetCatalogForTest()
+	applyModelCatalog(chat)
+	if out, ok := chat["output_config"].(map[string]any); !ok || out["effort"] != "high" {
+		t.Fatalf("level not translated to output_config: %#v", chat)
+	}
+}

@@ -116,6 +116,8 @@ func ensureClaimVersion() {
 	claimVersionMu.Unlock()
 
 	go func() {
+		// panic 兜底：拉版本号失败最多是版本旧一点，不该把进程带走。
+		defer guardPanic("claimVersion")
 		defer func() {
 			claimVersionMu.Lock()
 			claimVersionRefreshing = false

@@ -146,6 +146,9 @@ func (s *Server) ensureModelCatalog(acc *Account) {
 	catalogMu.Unlock()
 
 	go func() {
+		// panic 兜底放在最前面：它最后一个执行，前面的 defer 还能把
+		// refreshing 标记和锁收干净，下一轮刷新不会被永久卡住。
+		defer guardPanic("modelCatalog")
 		defer func() {
 			catalogMu.Lock()
 			catalogRefreshing = false
@@ -297,4 +300,39 @@ func applyModelCatalog(payload map[string]any) {
 		return
 	}
 	applyCatalogSets(payload, catalogReasoningSets(model, level))
+}
+
+// normalizeReasoningLevel 把各家客户端的思考强度词表收敛成上游认的档位。
+//
+// 上游 client/configs 的 reasoning.levels 只有 low/high/max（catalogReasoningSets
+// 的回落路径也写这三个），OpenAI 的 minimal/medium 必须先映射，否则
+// applyModelCatalog 会把 "medium" 原样写进 output_config.effort 让上游 1210。
+// 认不出来的值返回空串：宁可走模型默认，也不猜一个上游不认的档位。
+func normalizeReasoningLevel(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "minimal", "low":
+		return "low"
+	case "medium", "high":
+		return "high"
+	case "max":
+		return "max"
+	}
+	return ""
+}
+
+// reasoningLevelFromBody 同时认 Chat 的 reasoning_effort 和 Responses 的
+// reasoning.effort。effort=none 表示客户端不要思考，但我们没有可靠的上游
+// 关闭开关，按「不设置」处理（走模型默认）。
+func reasoningLevelFromBody(body map[string]any) string {
+	if effort, ok := body["reasoning_effort"].(string); ok {
+		if level := normalizeReasoningLevel(effort); level != "" {
+			return level
+		}
+	}
+	if reasoning, ok := body["reasoning"].(map[string]any); ok {
+		if effort, ok := reasoning["effort"].(string); ok {
+			return normalizeReasoningLevel(effort)
+		}
+	}
+	return ""
 }

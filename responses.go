@@ -26,6 +26,12 @@ import (
 // ---------- 请求：Responses → Anthropic ----------
 
 func responsesRequestToAnthropic(body map[string]any) (map[string]any, error) {
+	// 我们不存 response 对象，previous_response_id 没法展开成上下文。静默
+	// 忽略会让客户端以为历史带上了，实际只发了新的一段（答非所问）；
+	// 明确 400，让客户端改发完整 input。
+	if prev := firstString(body["previous_response_id"]); prev != "" {
+		return nil, errors.New("previous_response_id is not supported; send the full input array instead")
+	}
 	out := map[string]any{}
 	var system []string
 	if instructions, ok := body["instructions"].(string); ok && strings.TrimSpace(instructions) != "" {
@@ -67,6 +73,14 @@ func responsesRequestToAnthropic(body map[string]any) (map[string]any, error) {
 	}
 	if v, ok := body["top_p"]; ok {
 		out["top_p"] = v
+	}
+	// Responses 的 reasoning.effort 与 chat 的 reasoning_effort 同一套词表。
+	if level := reasoningLevelFromBody(body); level != "" {
+		out["thinking_level"] = level
+	}
+	// 同 chat：模型要带给上游，applyModelCatalog 才认得出来。
+	if model, ok := body["model"].(string); ok && model != "" {
+		out["model"] = model
 	}
 	out["stream"], _ = body["stream"].(bool)
 	return out, nil
@@ -253,14 +267,27 @@ func anthropicToResponsesResponse(data []byte, model string) ([]byte, Usage, err
 			Input    json.RawMessage `json:"input"`
 		} `json:"content"`
 		Usage struct {
-			InputTokens  int `json:"input_tokens"`
-			OutputTokens int `json:"output_tokens"`
+			InputTokens     int `json:"input_tokens"`
+			OutputTokens    int `json:"output_tokens"`
+			CacheReadTokens int `json:"cache_read_input_tokens"`
+			ReasoningTokens int `json:"reasoning_tokens"`
+			OutputDetails   struct {
+				ReasoningTokens int `json:"reasoning_tokens"`
+			} `json:"output_tokens_details"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		return nil, Usage{}, err
 	}
-	usage := Usage{InputTokens: parsed.Usage.InputTokens, OutputTokens: parsed.Usage.OutputTokens}
+	usage := Usage{
+		InputTokens:     parsed.Usage.InputTokens,
+		OutputTokens:    parsed.Usage.OutputTokens,
+		CacheReadTokens: parsed.Usage.CacheReadTokens,
+		ReasoningTokens: parsed.Usage.ReasoningTokens,
+	}
+	if usage.ReasoningTokens == 0 {
+		usage.ReasoningTokens = parsed.Usage.OutputDetails.ReasoningTokens
+	}
 	output := make([]any, 0, len(parsed.Content))
 	for _, block := range parsed.Content {
 		switch block.Type {
@@ -295,10 +322,7 @@ func anthropicToResponsesResponse(data []byte, model string) ([]byte, Usage, err
 	resp := map[string]any{
 		"id": "resp_" + randomHex(16), "object": "response", "created_at": time.Now().Unix(),
 		"model": model, "status": "completed", "output": output,
-		"usage": map[string]any{
-			"input_tokens": usage.InputTokens, "output_tokens": usage.OutputTokens,
-			"total_tokens": usage.InputTokens + usage.OutputTokens,
-		},
+		"usage": responsesUsage(usage),
 	}
 	out, err := json.Marshal(resp)
 	return out, usage, err
@@ -369,11 +393,24 @@ func (s *responsesStream) responseObject(status string) map[string]any {
 		"id": s.id, "object": "response", "created_at": s.created,
 		"model": s.model, "status": status,
 		"output": append([]any(nil), s.output...),
-		"usage": map[string]any{
-			"input_tokens":  s.usage.InputTokens,
-			"output_tokens": s.usage.OutputTokens,
-			"total_tokens":  s.usage.InputTokens + s.usage.OutputTokens,
-		},
+		"usage":  responsesUsage(s.usage),
+	}
+}
+
+// responsesUsage 是 Responses 线的 usage。客户端（async-openai / Codex）对
+// input_tokens_details 和 output_tokens_details 没有 serde 默认值，缺了会
+// 直接 "missing field" 整轮失败，所以两个对象恒发。
+//
+// input_tokens 按 OpenAI 口径算（含缓存命中的部分），cached_tokens 是其中
+// 的子集；Anthropic 的 input_tokens 不含缓存，这里补上。
+func responsesUsage(u Usage) map[string]any {
+	prompt := u.InputTokens + u.CacheReadTokens
+	return map[string]any{
+		"input_tokens":          prompt,
+		"input_tokens_details":  map[string]any{"cached_tokens": u.CacheReadTokens},
+		"output_tokens":         u.OutputTokens,
+		"output_tokens_details": map[string]any{"reasoning_tokens": u.ReasoningTokens},
+		"total_tokens":          prompt + u.OutputTokens,
 	}
 }
 
@@ -534,12 +571,18 @@ func (s *responsesStream) feed(line string) bool {
 		// message_start 的 usage 嵌在 message 里，不在事件顶层。
 		Message struct {
 			Usage struct {
-				InputTokens int `json:"input_tokens"`
+				InputTokens     int `json:"input_tokens"`
+				CacheReadTokens int `json:"cache_read_input_tokens"`
 			} `json:"usage"`
 		} `json:"message"`
 		Usage struct {
-			InputTokens  int `json:"input_tokens"`
-			OutputTokens int `json:"output_tokens"`
+			InputTokens     int `json:"input_tokens"`
+			OutputTokens    int `json:"output_tokens"`
+			CacheReadTokens int `json:"cache_read_input_tokens"`
+			ReasoningTokens int `json:"reasoning_tokens"`
+			OutputDetails   struct {
+				ReasoningTokens int `json:"reasoning_tokens"`
+			} `json:"output_tokens_details"`
 		} `json:"usage"`
 	}
 	if json.Unmarshal([]byte(payload), &event) != nil {
@@ -549,8 +592,11 @@ func (s *responsesStream) feed(line string) bool {
 	produced := false
 	switch event.Type {
 	case "message_start":
-		if event.Message.Usage.InputTokens > 0 {
-			s.usage.InputTokens = event.Message.Usage.InputTokens
+		if v := event.Message.Usage.InputTokens; v > 0 {
+			s.usage.InputTokens = v
+		}
+		if v := event.Message.Usage.CacheReadTokens; v > 0 {
+			s.usage.CacheReadTokens = v
 		}
 	case "content_block_start":
 		switch event.ContentBlock.Type {
@@ -596,8 +642,24 @@ func (s *responsesStream) feed(line string) bool {
 			s.closeReasoning()
 		}
 	case "message_delta":
-		if event.Usage.OutputTokens > 0 {
-			s.usage.OutputTokens = event.Usage.OutputTokens
+		// 实测 GLM 的 message_start 里 input_tokens 恒为 0，真实 prompt 长度
+		// 在 message_delta 才给，所以这里也要接。
+		if v := event.Usage.InputTokens; v > 0 {
+			s.usage.InputTokens = v
+		}
+		if v := event.Usage.OutputTokens; v > 0 {
+			s.usage.OutputTokens = v
+		}
+		if v := event.Usage.CacheReadTokens; v > 0 {
+			s.usage.CacheReadTokens = v
+		}
+		// reasoning_tokens 两种上游形态都见过：顶层直给，或塞在
+		// output_tokens_details 里（OpenAI 口径）。
+		if v := event.Usage.ReasoningTokens; v > 0 {
+			s.usage.ReasoningTokens = v
+		}
+		if v := event.Usage.OutputDetails.ReasoningTokens; v > 0 {
+			s.usage.ReasoningTokens = v
 		}
 		if event.Delta.StopReason != "" {
 			s.finished = true

@@ -460,6 +460,54 @@ func TestRateLimit429DoesNotBurnAccount(t *testing.T) {
 		t.Fatalf("429 must leave the account healthy: %#v", got)
 	}
 }
+
+// 上游用 200 承载 1005：池子只有一个号、换号换不动时，客户端必须收到 429
+// 而不是 200+错误体——后者会被 OpenAI SDK 当成空回复，连异常都不抛。
+func TestBusinessErrorStatusOnPoolExhausted(t *testing.T) {
+	dir, err := os.MkdirTemp("", "zcg-biz-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = store.Close()
+		_ = os.RemoveAll(dir)
+	})
+	store.accounts = nil
+	store.settings.ProxyToken = ""
+	acc := &Account{
+		ID: "biz-1005", Label: "biz-1005", Provider: "zai", Mode: "start-plan",
+		User: UserInfo{ID: "biz-user"}, Enabled: true, CreatedAt: 1,
+		ZcodeJWT: "fake-token", Models: map[string]*UsageTotals{},
+		Quota: Quota{Granted: 1000, Remaining: 1000},
+	}
+	if err := store.AddAccount(acc); err != nil {
+		t.Fatal(err)
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":1005,"msg":"exceed quota limit"}`))
+	}))
+	t.Cleanup(upstream.Close)
+	t.Setenv("ZCODE_UPSTREAM", upstream.URL+"/v1/messages")
+	t.Setenv("ZCODE_RETRY_WAIT_SEC", "0")
+	server := NewServer(store, mustUpstream(t), "http://test")
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"GLM-5.3-Flash","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	server.handleMessages(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 for 200+1005, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "exceed quota limit") {
+		t.Fatalf("upstream message should be preserved: %s", rec.Body.String())
+	}
+}
 func TestRateLimitFreezesAfterThreeConsecutiveFailures(t *testing.T) {
 	dir, err := os.MkdirTemp("", "zcg-rate-test-")
 	if err != nil {

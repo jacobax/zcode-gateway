@@ -89,6 +89,8 @@ func (s *Server) ensureEndpointMap(ctx context.Context, acc *Account) {
 	endpointMapMu.Unlock()
 
 	go func() {
+		// panic 兜底：刷新失败只该留旧快照，不该把进程带走。
+		defer guardPanic("endpointMap")
 		defer func() {
 			endpointMapMu.Lock()
 			endpointMapRefreshing = false

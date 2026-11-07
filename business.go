@@ -16,6 +16,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"net/http"
 	"strings"
 
 	fhttp "github.com/bogdanfinn/fhttp"
@@ -80,4 +81,21 @@ func businessErrorVerdict(body []byte) (upstreamVerdict, bool) {
 		return upstreamVerdict{}, false
 	}
 	return verdict, true
+}
+
+// businessErrorStatus 把「200 + 业务错误码」翻成该给的 HTTP 状态。
+//
+// 为什么必须翻：池子里所有号都试过还是业务失败时，如果按 200 原样回给客户端，
+// OpenAI SDK 会把错误体当成空回复（不抛异常），客户端只看到「模型不说话」，
+// 排障时也看不出是额度问题。返回 0 表示不是业务错误，调用方保持原状态。
+func businessErrorStatus(body []byte) int {
+	verdict, ok := businessErrorVerdict(body)
+	if !ok {
+		return 0
+	}
+	if verdict.RateLimited || verdict.Wait > 0 {
+		// 额度耗尽、瞬时限流、模型并发准入：都是「等一会儿再来」。
+		return http.StatusTooManyRequests
+	}
+	return http.StatusBadGateway
 }

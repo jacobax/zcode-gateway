@@ -477,18 +477,24 @@ func (s *Store) NoteFailure(id, reason string) {
 // reports whether the account exists; a failed write is logged instead of
 // being returned, so a disk error never reads as "account not found".
 func (s *Store) UpdateAccount(id string, fn func(*Account)) bool {
+	var saveErr error
+	found := false
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for _, acc := range s.accounts {
 		if acc.ID == id {
 			fn(acc)
-			if err := s.saveLocked(); err != nil {
-				log.Printf("保存账号 %s 失败：%v（内存已更新，落盘未生效）", id, err)
-			}
-			return true
+			saveErr = s.saveLocked()
+			found = true
+			break
 		}
 	}
-	return false
+	s.mu.Unlock()
+	// 落盘失败要记日志，但不能持锁打：log 自己也有锁，持着账号锁去拿它，
+	// 跟任何「先打日志再改账号」的路径叠起来就是锁序风险。
+	if saveErr != nil {
+		log.Printf("保存账号 %s 失败：%v（内存已更新，落盘未生效）", id, saveErr)
+	}
+	return found
 }
 
 func (s *Store) UpdateAccountMemory(id string, fn func(*Account)) bool {
@@ -625,10 +631,21 @@ func (s *Store) EffectiveConcurrency(acc *Account) int {
 	return s.effectiveConcurrencyLocked(acc)
 }
 
+// UpdateSettings 先落盘、成功后才算数。
+//
+// 为什么不是「先改内存再尽力落盘」：写失败时界面显示改成功、进程也按新值跑，
+// 但重启后又变回旧值——用户会以为设置随机丢失。现在失败就回滚内存并记日志，
+// 至少行为是可预期的（等于这次修改没发生）。
 func (s *Store) UpdateSettings(fn func(*Settings)) {
 	s.mu.Lock()
+	prev := s.settings
 	fn(&s.settings)
-	_ = s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		s.settings = prev
+		s.mu.Unlock()
+		log.Printf("保存设置失败：%v（已回滚内存）", err)
+		return
+	}
 	s.mu.Unlock()
 }
 
