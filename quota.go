@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -66,6 +68,63 @@ func (s *Server) quotaHTTP() HTTPDoer {
 		return s.quotaClient
 	}
 	return s.upstream
+}
+
+// forceQuotaRefresh 在 1005 命中后立刻刷一次真实额度（对齐 zcode2api-plus 的
+// fireRefresh）。按号去重：1005 风暴时每个号最多 30 秒强制刷一次，定时刷新
+// 本来就兜底，别把 billing 接口打爆。
+func (s *Server) forceQuotaRefresh(acc *Account) {
+	if acc == nil {
+		return
+	}
+	now := time.Now().Unix()
+	quotaForceMu.Lock()
+	if last, ok := quotaForceAt[acc.ID]; ok && now-last < int64(quotaForceWait.Seconds()) {
+		quotaForceMu.Unlock()
+		return
+	}
+	quotaForceAt[acc.ID] = now
+	quotaForceMu.Unlock()
+	go func() {
+		defer guardPanic("forceQuotaRefresh")
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = s.refreshQuota(ctx, acc)
+	}()
+}
+
+var (
+	quotaForceMu   sync.Mutex
+	quotaForceAt   = map[string]int64{}
+	quotaForceWait = 30 * time.Second
+)
+
+// healModelStates 在额度恢复时清掉该号的全部模型级熔断。
+//
+// 为什么在刷新里做：熔断状态唯一无法自愈的是 Disabled——那些 (账号,模型) 对
+// 不会再被派发请求，永远等不来能清掉它的成功。其余原因（3010 并发、3012 风控）
+// 本来就带各自的冷却时间，被这里一并清掉也无妨：账号有额度本身就说明它值得
+// 再给一次机会。
+func (s *Server) healModelStates(acc *Account, quota Quota) {
+	if acc == nil || quota.Granted <= 0 || quota.Remaining <= 0 {
+		return
+	}
+	states := s.store.ModelStatesFor(acc.ID)
+	if len(states) == 0 {
+		return
+	}
+	s.store.ResetAccountModelStates(acc.ID)
+	models := make([]string, 0, len(states))
+	seen := map[string]bool{}
+	for _, st := range states {
+		if !seen[st.Model] {
+			seen[st.Model] = true
+			models = append(models, st.Model)
+		}
+	}
+	sort.Strings(models)
+	s.recordAccountEvent(acc, "模型熔断解除",
+		fmt.Sprintf("额度恢复（剩余 %d），清除 %s", quota.Remaining, strings.Join(models, ", ")))
 }
 
 // refreshQuota 拉一次额度并落库：billing/current 给套餐定义，billing/balance
@@ -165,6 +224,9 @@ func (s *Server) refreshQuota(ctx context.Context, acc *Account) error {
 			s.recordAccountEvent(updated, event.action, event.detail)
 		}
 	}
+	// 额度恢复时把模型级熔断一起清掉：Disabled 的 (账号,模型) 对没有流量
+	// 就永远无法自愈（2026-11-10 实测 5 号站额度恢复后仍显示已禁用）。
+	s.healModelStates(acc, quota)
 	if quota.Granted > 0 && quota.Remaining <= 0 {
 		// Hard failure: no session can stay on an account without quota.
 		s.pool.InvalidateAccount(acc.ID)

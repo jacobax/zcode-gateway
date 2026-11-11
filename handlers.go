@@ -936,7 +936,16 @@ func (s *Server) applyVerdict(acc *Account, v upstreamVerdict, model string) {
 		s.store.MarkExhausted(acc.ID, time.Now().Add(v.Cooldown), v.Reason)
 		s.recordAccountEvent(acc, "冷却", fmt.Sprintf("%s：%s", v.Cooldown, v.Reason))
 	case v.ModelScoped && model != "":
-		state := s.store.RecordModelFailure(acc.ID, model, v.Reason)
+		var state ModelState
+		if v.RateLimited {
+			// 额度耗尽（1005/13xx）：账号没坏，冷却封顶不 Disabled，
+			// 并立刻刷一次额度让缓存跟上真实（对齐 zcode2api-plus 的
+			// markModelExhausted + fireRefresh）。
+			state = s.store.RecordModelFailureCapped(acc.ID, model, v.Reason)
+			s.forceQuotaRefresh(acc)
+		} else {
+			state = s.store.RecordModelFailure(acc.ID, model, v.Reason)
+		}
 		if state.CooldownUntil > 0 || state.Disabled {
 			s.recordAccountEvent(acc, "模型级熔断", fmt.Sprintf("%s stage=%d disabled=%v：%s", model, state.Stage, state.Disabled, v.Reason))
 		}

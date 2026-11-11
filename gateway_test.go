@@ -286,7 +286,7 @@ func TestModelCooldownEscalation(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close(); _ = os.RemoveAll(dir) })
 	now := int64(1000)
 	for i := 0; i < 3; i++ {
-		store.recordModelFailureAt("acc", "GLM-5.3-Flash", "429", now+int64(i))
+		store.recordModelFailureAt("acc", "GLM-5.3-Flash", "429", now+int64(i), capDisable)
 	}
 	state, ok := store.ModelStateFor("acc", "GLM-5.3-Flash")
 	if !ok || state.Stage != 1 || state.CooldownUntil != now+2+60 || state.Streak != 0 {
@@ -300,7 +300,7 @@ func TestModelCooldownEscalation(t *testing.T) {
 	}
 	base := now + 61
 	for i := 0; i < 3; i++ {
-		store.recordModelFailureAt("acc", "GLM-5.3-Flash", "429", base+int64(i))
+		store.recordModelFailureAt("acc", "GLM-5.3-Flash", "429", base+int64(i), capDisable)
 	}
 	state, _ = store.ModelStateFor("acc", "GLM-5.3-Flash")
 	if state.Stage != 2 || state.CooldownUntil != base+2+600 {
@@ -308,7 +308,7 @@ func TestModelCooldownEscalation(t *testing.T) {
 	}
 	base = state.CooldownUntil + 1
 	for i := 0; i < 3; i++ {
-		store.recordModelFailureAt("acc", "GLM-5.3-Flash", "429", base+int64(i))
+		store.recordModelFailureAt("acc", "GLM-5.3-Flash", "429", base+int64(i), capDisable)
 	}
 	state, _ = store.ModelStateFor("acc", "GLM-5.3-Flash")
 	if !state.Disabled || state.Stage != 3 {
@@ -326,7 +326,7 @@ func TestModelCooldownEscalation(t *testing.T) {
 func TestPoolSkipsCoolingModelOnly(t *testing.T) {
 	store := newPoolTestStore(t)
 	for i := 0; i < 3; i++ {
-		store.recordModelFailureAt("a1", "GLM-5.3-Flash", "429", time.Now().Unix()+int64(i))
+		store.recordModelFailureAt("a1", "GLM-5.3-Flash", "429", time.Now().Unix()+int64(i), capDisable)
 	}
 	pool := NewPool(store)
 	acc, release, err := pool.AcquireForModel(context.Background(), "", "GLM-5.3-Flash")

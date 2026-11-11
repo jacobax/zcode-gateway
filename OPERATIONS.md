@@ -285,8 +285,9 @@ TLS）→ CONNECT → 对目标再做一次 TLS → 发 `GET /api/v1/client/conf
    `{"code":1005,...}` 且状态码 200，网关不认识这个业务码，会把它当成正常响应透传给客户端。
    所以没额度的号要禁用，别留在转发池里。
 
-4. **选号不看额度**。`Available()` 只判断 `enabled && ExhaustedUntil<=now`，额度为 0 的
-   启用账号照样会被选中 —— 这也是第 3 条的触发条件。
+4. **选号看不看额度分两层**。账号级 `p.healthy` 检查 `Granted>0 && Remaining<=0`，
+   额度耗尽的号不会被派发（2026-11-11 确认，早年的「不看额度」已修）；但缓存有
+   30 秒滞后，刚用完的号仍可能吃一次 1005——那会触发强制额度刷新（见第 27 条）。
 
 5. **`claimable` 不可信**。已领取的套餐在 preview 里可能仍标 `claimable=true`，重复领取
    返回 `1003`。判断"能不能领"只能靠实际提交。
@@ -453,6 +454,18 @@ TLS）→ CONNECT → 对目标再做一次 TLS → 发 `GET /api/v1/client/conf
     体当成空回复，连异常都不抛，排障时只看到「模型不说话」。现在按业务码映射：
     额度/限流/模型并发 → 429，风控/会话过期 → 502。实测没额度的号三个端点都从
     `200 + {"code":...}` 变成 `429`，错误消息保留。
+
+27. **额度类失败不许把模型熔断推到 Disabled**。模型级熔断原来是 3 次失败升一档，
+    stage3 永久禁用——但 Disabled 的 (账号,模型) 对不会再被派发请求，永远等不来
+    能清掉它的成功。2026-11-10 实测：5 号站 Start Plan 额度耗尽触发熔断，次日额度
+    恢复后仍显示「GLM-5.3-Flash · 已禁用」。修复（对齐 zcode2api-plus 的
+    markModelExhausted + fireRefresh + SyncExhaustedModels）：
+    1) `RecordModelFailureCapped`：1005/13xx 封顶 stage2（10 分钟冷却），不 Disabled；
+       网络/鉴权类失败仍走原升级路径。
+    2) `forceQuotaRefresh`：1005 命中立刻异步刷一次真实额度（按号去重，30s 一次）。
+    3) `healModelStates`：额度刷新发现 `Remaining>0` 时清掉该号全部模型熔断，
+       记「模型熔断解除」事件——已存在的 Disabled 状态也由此自愈。
+    线上已有的 Disabled 记录不用手动清：部署后首轮额度刷新（≤30s）就会清掉。
 
 ## 出口 IP 与风控
 

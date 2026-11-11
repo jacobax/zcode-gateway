@@ -70,10 +70,26 @@ disabled=excluded.disabled, last_error=excluded.last_error, updated_at=excluded.
 }
 
 func (s *Store) RecordModelFailure(accountID, model, reason string) ModelState {
-	return s.recordModelFailureAt(accountID, model, reason, time.Now().Unix())
+	return s.recordModelFailureAt(accountID, model, reason, time.Now().Unix(), capDisable)
 }
 
-func (s *Store) recordModelFailureAt(accountID, model, reason string, now int64) ModelState {
+// RecordModelFailureCapped 用于「账号没坏，只是没额度」的失败（1005/13xx）。
+// 为什么封顶：Disabled 的 (账号,模型) 对不会再被派发请求，永远等不来那次
+// 能清掉它的成功——额度恢复后池子就永久缩水（2026-11-10 实测：5 号站额度
+// 恢复后 GLM-5.3-Flash 仍显示已禁用）。额度类失败最多 10 分钟冷却。
+func (s *Store) RecordModelFailureCapped(accountID, model, reason string) ModelState {
+	return s.recordModelFailureAt(accountID, model, reason, time.Now().Unix(), capCooldown)
+}
+
+// failureCap 决定 streak 攒满后允许的最高档位。
+type failureCap int
+
+const (
+	capDisable  failureCap = iota // 网络/鉴权失败：可升级到 stage3 永久熔断
+	capCooldown                   // 额度耗尽：封顶 stage2（10 分钟冷却）
+)
+
+func (s *Store) recordModelFailureAt(accountID, model, reason string, now int64, cap failureCap) ModelState {
 	model = strings.TrimSpace(model)
 	state := ModelState{AccountID: accountID, Model: model, LastError: reason, UpdatedAt: now}
 	key := modelKey(accountID, model)
@@ -88,15 +104,20 @@ func (s *Store) recordModelFailureAt(accountID, model, reason string, now int64)
 	state.Streak++
 	if state.Streak >= modelFailureLimit {
 		state.Streak = 0
-		state.Stage++
-		switch state.Stage {
-		case 1:
-			state.CooldownUntil = now + int64(modelCooldownStage1.Seconds())
-		case 2:
+		if cap == capCooldown && state.Stage >= 2 {
+			// 已在封顶档：只续冷却，不升档，更不 Disabled。
 			state.CooldownUntil = now + int64(modelCooldownStage2.Seconds())
-		default:
-			state.Disabled = true
-			state.CooldownUntil = 0
+		} else {
+			state.Stage++
+			switch state.Stage {
+			case 1:
+				state.CooldownUntil = now + int64(modelCooldownStage1.Seconds())
+			case 2:
+				state.CooldownUntil = now + int64(modelCooldownStage2.Seconds())
+			default:
+				state.Disabled = true
+				state.CooldownUntil = 0
+			}
 		}
 	}
 	state.LastError = reason
