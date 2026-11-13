@@ -99,32 +99,36 @@ var (
 	quotaForceWait = 30 * time.Second
 )
 
-// healModelStates 在额度恢复时清掉该号的全部模型级熔断。
+// healModelStates 在额度恢复时清掉对应的模型级熔断。
 //
-// 为什么在刷新里做：熔断状态唯一无法自愈的是 Disabled——那些 (账号,模型) 对
-// 不会再被派发请求，永远等不来能清掉它的成功。其余原因（3010 并发、3012 风控）
-// 本来就带各自的冷却时间，被这里一并清掉也无妨：账号有额度本身就说明它值得
-// 再给一次机会。
+// 为什么按模型清：上游按模型分桶记账，账号级合计>0 不代表每个模型都有额度
+// （2026-11-11 线上实测：Flash 桶耗尽但合计 3M，账号级清熔断把 10 分钟冷却
+// 每 30 秒洗一次，造成无限重试「失败 200」）。只清「快照里该模型剩余>0」的
+// 熔断；快照缺这个模型的条目时保守不动。快照整体缺失（len(Models)==0，
+// 比如两个接口都抽风）也整个跳过——下一次成功的刷新会补上。
 func (s *Server) healModelStates(acc *Account, quota Quota) {
-	if acc == nil || quota.Granted <= 0 || quota.Remaining <= 0 {
+	if acc == nil || len(quota.Models) == 0 {
 		return
 	}
 	states := s.store.ModelStatesFor(acc.ID)
 	if len(states) == 0 {
 		return
 	}
-	s.store.ResetAccountModelStates(acc.ID)
-	models := make([]string, 0, len(states))
-	seen := map[string]bool{}
+	var cleared []string
 	for _, st := range states {
-		if !seen[st.Model] {
-			seen[st.Model] = true
-			models = append(models, st.Model)
+		remaining, found := modelRemaining(quota.Models, st.Model)
+		if !found || remaining <= 0 {
+			continue
 		}
+		s.store.ResetModelState(acc.ID, st.Model)
+		cleared = append(cleared, st.Model)
 	}
-	sort.Strings(models)
+	if len(cleared) == 0 {
+		return
+	}
+	sort.Strings(cleared)
 	s.recordAccountEvent(acc, "模型熔断解除",
-		fmt.Sprintf("额度恢复（剩余 %d），清除 %s", quota.Remaining, strings.Join(models, ", ")))
+		fmt.Sprintf("额度恢复，清除 %s", strings.Join(cleared, ", ")))
 }
 
 // refreshQuota 拉一次额度并落库：billing/current 给套餐定义，billing/balance

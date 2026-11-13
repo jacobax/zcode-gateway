@@ -463,9 +463,17 @@ TLS）→ CONNECT → 对目标再做一次 TLS → 发 `GET /api/v1/client/conf
     1) `RecordModelFailureCapped`：1005/13xx 封顶 stage2（10 分钟冷却），不 Disabled；
        网络/鉴权类失败仍走原升级路径。
     2) `forceQuotaRefresh`：1005 命中立刻异步刷一次真实额度（按号去重，30s 一次）。
-    3) `healModelStates`：额度刷新发现 `Remaining>0` 时清掉该号全部模型熔断，
-       记「模型熔断解除」事件——已存在的 Disabled 状态也由此自愈。
+    3) `healModelStates`：额度刷新时**按模型**清熔断——只清「快照里该模型剩余>0」
+       的，快照缺条目或缺分模型数据时保守不动，记「模型熔断解除」事件——
+       已存在的 Disabled 状态也由此自愈。
     线上已有的 Disabled 记录不用手动清：部署后首轮额度刷新（≤30s）就会清掉。
+
+    2026-11-11 补丁（当天线上抓到的反例）：上游把 Start Plan 8M 分成
+    GLM-5.3 3M + GLM-5.3-Flash 5M 两个独立桶。某号 Flash 桶耗尽但账号合计
+    还剩 3M：选号只看合计一直放行；v1.16.1 的账号级 heal 更是把 Flash 的
+    10 分钟冷却每 30 秒洗一次 → 无限重试「失败 200」。修复：选号与 heal
+    都改用 `Quota.Models` 分桶数据（`quotaModelExhausted` / `modelRemaining`），
+    快照缺条目按「未知」放行，绝不过滤空池子。
 
 ## 出口 IP 与风控
 

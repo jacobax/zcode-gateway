@@ -247,7 +247,7 @@ func (p *Pool) acquire(ctx context.Context, sessionKey string, exclude map[strin
 			if exclude[acc.ID] {
 				continue
 			}
-			if p.healthy(acc, now) && p.store.ModelHealthy(acc.ID, model, now) {
+			if p.healthy(acc, now) && !quotaModelExhausted(acc, model) && p.store.ModelHealthy(acc.ID, model, now) {
 				healthy = append(healthy, acc)
 			}
 		}
@@ -270,7 +270,7 @@ func (p *Pool) acquire(ctx context.Context, sessionKey string, exclude map[strin
 				// The preference can never come back, so start a new one.
 				p.store.db.Unbind(sessionKey)
 				preferred = ""
-			} else if !exclude[acc.ID] && p.healthy(acc, now) && p.store.ModelHealthy(acc.ID, model, now) {
+			} else if !exclude[acc.ID] && p.healthy(acc, now) && !quotaModelExhausted(acc, model) && p.store.ModelHealthy(acc.ID, model, now) {
 				slot := p.slotFor(acc)
 				// Wait a bounded time for the preferred account; past the budget
 				// fall through to another idle account for this request only.
@@ -321,6 +321,39 @@ func (p *Pool) acquire(ctx context.Context, sessionKey string, exclude map[strin
 			return nil, nil, ctx.Err()
 		}
 	}
+}
+
+// quotaModelExhausted 报告额度缓存是否明确说「这个模型在这个号上没额度」。
+//
+// 上游按模型分桶记账：Start Plan 的 8M 实际是 GLM-5.3 3M + GLM-5.3-Flash 5M
+// 两个独立桶。账号级合计会掩盖单桶耗尽——2026-11-11 线上实测：某号 Flash 桶
+// 用完，账号合计还剩 3M，选号一直放行，日志里刷满「失败 200 exceed quota limit」。
+// 缓存没有该模型条目时返回 false：未知 ≠ 耗尽，宁可让它吃一次 1005 触发
+// 强制刷新，也不要把池子过滤空。
+func quotaModelExhausted(acc *Account, model string) bool {
+	if acc == nil || strings.TrimSpace(model) == "" || len(acc.Quota.Models) == 0 {
+		return false
+	}
+	remaining, found := modelRemaining(acc.Quota.Models, model)
+	return found && remaining <= 0
+}
+
+// modelRemaining 返回某模型在额度快照里的剩余（大小写不敏感匹配）。
+// found=false 表示快照里没有这个模型的条目。
+func modelRemaining(models []QuotaModel, name string) (int64, bool) {
+	target := strings.ToLower(strings.TrimSpace(name))
+	if target == "" {
+		return 0, false
+	}
+	var sum int64
+	found := false
+	for _, m := range models {
+		if strings.ToLower(strings.TrimSpace(m.Name)) == target {
+			sum += m.Remaining
+			found = true
+		}
+	}
+	return sum, found
 }
 
 // tryHoldSlot takes a slot only when it is free right now.

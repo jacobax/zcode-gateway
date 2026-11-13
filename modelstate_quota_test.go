@@ -58,32 +58,46 @@ func TestUncappedModelFailureStillDisables(t *testing.T) {
 	}
 }
 
-// 额度恢复要清掉全部模型熔断（含 Disabled），没恢复就保留。
+// 额度恢复要按模型清熔断：上游分桶记账，账号合计>0 不代表每个模型都恢复。
+// 没有分模型快照时保守不动。
 func TestHealModelStates(t *testing.T) {
 	server, store := newQuotaTestServer(t)
 	acc := store.GetAccount("acc1")
-	for i := 0; i < 9; i++ {
-		store.RecordModelFailure(acc.ID, "GLM-5.3-Flash", "exceed quota limit")
+	for _, model := range []string{"GLM-5.3-Flash", "GLM-5.3"} {
+		for i := 0; i < 9; i++ {
+			store.RecordModelFailure(acc.ID, model, "exceed quota limit")
+		}
 	}
 	if st, _ := store.ModelStateFor(acc.ID, "GLM-5.3-Flash"); !st.Disabled {
-		t.Fatal("precondition: state should be Disabled")
+		t.Fatal("precondition: Flash should be Disabled")
 	}
 
-	server.healModelStates(acc, Quota{Granted: 0, Remaining: 0})
-	if st, _ := store.ModelStateFor(acc.ID, "GLM-5.3-Flash"); !st.Disabled {
-		t.Fatal("no quota: state must stay")
-	}
-
-	server.healModelStates(acc, Quota{Granted: 100, Remaining: 0})
-	if st, _ := store.ModelStateFor(acc.ID, "GLM-5.3-Flash"); !st.Disabled {
-		t.Fatal("zero remaining: state must stay")
-	}
-
+	// 无分模型快照：不清。
 	server.healModelStates(acc, Quota{Granted: 100, Remaining: 70})
-	if _, ok := store.ModelStateFor(acc.ID, "GLM-5.3-Flash"); ok {
-		t.Fatal("quota recovered: model states must be cleared")
+	if _, ok := store.ModelStateFor(acc.ID, "GLM-5.3-Flash"); !ok {
+		t.Fatal("no per-model snapshot: nothing may be cleared")
 	}
-	// 事件要记下来，面板「账号事件」里能看到解除原因。
+
+	models := func(flash, glm int64) []QuotaModel {
+		return []QuotaModel{
+			{Name: "GLM-5.3-Flash", Remaining: flash},
+			{Name: "GLM-5.3", Remaining: glm},
+		}
+	}
+	// Flash 桶为 0：Flash 熔断保留，GLM-5.3 恢复则清。
+	server.healModelStates(acc, Quota{Models: models(0, 3_000_000)})
+	if _, ok := store.ModelStateFor(acc.ID, "GLM-5.3-Flash"); !ok {
+		t.Fatal("Flash bucket still empty: its state must stay")
+	}
+	if _, ok := store.ModelStateFor(acc.ID, "GLM-5.3"); ok {
+		t.Fatal("GLM-5.3 bucket recovered: its state must be cleared")
+	}
+
+	// 两桶都恢复：全部清除。
+	server.healModelStates(acc, Quota{Models: models(4_000_000, 3_000_000)})
+	if _, ok := store.ModelStateFor(acc.ID, "GLM-5.3-Flash"); ok {
+		t.Fatal("Flash recovered: state must be cleared")
+	}
 	actions := accountEventActions(store)
 	if len(actions) == 0 || actions[len(actions)-1] != "模型熔断解除" {
 		t.Fatalf("heal event missing: %v", actions)
@@ -149,4 +163,65 @@ func TestPoolSkipsQuotaExhaustedAccount(t *testing.T) {
 		t.Fatalf("known-empty account must be skipped, got %s", acc.ID)
 	}
 	release()
+}
+
+// 上游按模型分桶：账号合计>0 但请求的那个模型桶为 0 时，必须跳过该号；
+// 其它模型的请求不受影响。
+func TestPoolSkipsModelExhaustedBucket(t *testing.T) {
+	store := newPoolTestStore(t)
+	// a1：Flash 桶空、GLM-5.3 桶有量（复刻 zai-1df9c927 线上现场）。
+	store.UpdateAccountMemory("a1", func(acc *Account) {
+		acc.Quota = Quota{
+			Granted: 8_000_000, Remaining: 3_000_000,
+			Models: []QuotaModel{
+				{Name: "GLM-5.3", Granted: 3_000_000, Remaining: 3_000_000},
+				{Name: "GLM-5.3-Flash", Granted: 5_000_000, Remaining: 0},
+			},
+		}
+	})
+	store.UpdateAccountMemory("a2", func(acc *Account) {
+		acc.Quota = Quota{Granted: 8_000_000, Remaining: 8_000_000}
+	})
+	pool := NewPool(store)
+	ctx := context.Background()
+
+	acc, release, err := pool.AcquireForModel(ctx, "", "GLM-5.3-Flash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acc.ID != "a2" {
+		t.Fatalf("model-exhausted bucket must be skipped, got %s", acc.ID)
+	}
+	release()
+
+	// a1 的 GLM-5.3 桶还有量：禁用 a2 后 GLM-5.3 请求仍能用 a1。
+	store.UpdateAccountMemory("a2", func(acc *Account) { acc.Enabled = false })
+	acc, release, err = pool.AcquireForModel(ctx, "", "GLM-5.3")
+	if err != nil || acc == nil {
+		t.Fatalf("other model's bucket is fine: acc=%#v err=%v", acc, err)
+	}
+	if acc.ID != "a1" {
+		t.Fatalf("expected a1 for GLM-5.3, got %s", acc.ID)
+	}
+	release()
+}
+
+// 快照缺该模型条目 = 未知，不能当耗尽过滤（否则会把池子过滤空）。
+func TestQuotaModelExhaustedUnknownModel(t *testing.T) {
+	acc := &Account{Quota: Quota{Models: []QuotaModel{
+		{Name: "GLM-5.3", Remaining: 3_000_000},
+		{Name: "GLM-5.3-Flash", Remaining: 0},
+	}}}
+	if quotaModelExhausted(acc, "GLM-5.3-Air") {
+		t.Fatal("missing entry must be treated as unknown, not exhausted")
+	}
+	if quotaModelExhausted(acc, "") || quotaModelExhausted(nil, "GLM-5.3") {
+		t.Fatal("empty model / nil account must be unknown")
+	}
+	if !quotaModelExhausted(acc, "glm-5.3-flash") {
+		t.Fatal("zero bucket must be exhausted, match case-insensitive")
+	}
+	if quotaModelExhausted(acc, "glm-5.3") {
+		t.Fatal("bucket with quota is not exhausted")
+	}
 }
