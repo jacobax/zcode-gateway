@@ -44,6 +44,7 @@ const (
 	codeNoResourcePack = 1113 // Key 没有资源包，永久态
 	codeSessionExpired = 3004 // OAuth 会话过期
 	codeCaptchaReject  = 3007 // 验证码被拒
+	codeUserBusy       = 3008 // user 级并发上限：同号并发挤爆，瞬态（dengyie/hj01857655 口径）
 	codeModelBusy      = 3009 // 模型并发准入（dengyie 口径）
 	codeModelAdmit     = 3010 // 模型并发准入（zcode2api-plus 口径）
 	codeRiskControl    = 3012 // 风控：账号或网络环境异常
@@ -218,8 +219,11 @@ func businessCodeVerdict(code int, reason string) (upstreamVerdict, bool) {
 	case transientRateLimitCodes[code]:
 		return upstreamVerdict{Retry: true, Wait: defaultRetryAfter, RateLimited: true, Reason: reason}, true
 
-	case code == codeModelBusy || code == codeModelAdmit:
-		// 模型级并发准入：账号没坏，等一秒重来（原版客户端也是 1s/2s 退避）。
+	case code == codeUserBusy || code == codeModelBusy || code == codeModelAdmit:
+		// 并发准入族（3008 user 级 / 3009-3010 模型级）：账号没坏，等一秒
+		// 重来（原版客户端也是 1s/2s 退避）。3008 的根治靠调度层的在飞上限
+		// （slotLimit），这里只兜瞬态；没有这档的话 3008 若以 400 承载会落
+		// 进「不重试」直接甩给客户端（dengyie 2.7.44 / hj01857655 同款处置）。
 		return upstreamVerdict{Retry: true, ModelScoped: true, Wait: modelBusyRetryAfter, Reason: reason}, true
 	}
 	return upstreamVerdict{}, false

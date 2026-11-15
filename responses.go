@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -191,20 +192,76 @@ func responsesContentBlocks(content any) []any {
 	return nil
 }
 
-// responsesToolOutput 取工具结果文本。output 可能是字符串，也可能是 content 数组。
-func responsesToolOutput(output any) string {
-	if text := firstString(output); text != "" {
+// responsesToolOutput 把工具结果翻成 Anthropic tool_result 的 content。
+//
+// Responses 规范里 output 有三种形态：字符串、content-part 数组、结构化
+// JSON。原实现只认字符串和数组里的 text/content 键——工具回图（OpenAI
+// 文档明示的 {type:"input_image", image_url} 用法）被静默丢弃，结构化对象
+// 变成空串。现在结构化对象一律 JSON 序列化；数组带图片时产出 text+image
+// block 数组（对齐 TriDefender/zcode-api 2026-11-14 的 31f4d6e 同款修复）。
+//
+// 图片 block 是新加给上游的形态，挂 ZCODE_TOOL_RESULT_IMAGES 灰度，默认关：
+// 关闭时数组退化为纯文本拼接，与历史行为一致（丢图但保文本）。
+func responsesToolOutput(output any) any {
+	if text, ok := output.(string); ok {
 		return text
 	}
-	var b strings.Builder
 	if list, ok := output.([]any); ok {
+		images := toolResultImagesEnabled()
+		var text strings.Builder
+		var blocks []any
+		sawImage := false
 		for _, raw := range list {
-			if part, ok := raw.(map[string]any); ok {
-				b.WriteString(firstString(part["text"], part["content"]))
+			part, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			if txt := firstString(part["text"], part["content"]); txt != "" {
+				text.WriteString(txt)
+				blocks = append(blocks, map[string]any{"type": "text", "text": txt})
+				continue
+			}
+			url := firstString(part["image_url"], part["url"])
+			if url == "" {
+				url = nestedString(part, "image_url", "url")
+			}
+			if url == "" && part["type"] != "input_image" {
+				continue
+			}
+			if !images {
+				continue
+			}
+			if block, ok := imageBlock(url); ok {
+				blocks = append(blocks, block)
+				sawImage = true
+				continue
+			}
+			// 认不出的图片引用（如 https URL，上游拿不到公网图）和未知
+			// 件型不丢：降级成 JSON 文本，让模型看得到工具回了什么。
+			if b, err := json.Marshal(part); err == nil {
+				text.WriteString(string(b))
+				blocks = append(blocks, map[string]any{"type": "text", "text": string(b)})
 			}
 		}
+		if sawImage && len(blocks) > 0 {
+			return blocks
+		}
+		return text.String()
 	}
-	return b.String()
+	// 结构化对象（非字符串非数组）：JSON 字符串，别再变空串。
+	if output == nil {
+		return ""
+	}
+	if b, err := json.Marshal(output); err == nil {
+		return string(b)
+	}
+	return fmt.Sprint(output)
+}
+
+// toolResultImagesEnabled 灰度开关：tool_result 里的 input_image 翻成
+// image block 发给上游。复用 openai.go 的 imageBlock，只收 data URI。
+func toolResultImagesEnabled() bool {
+	return os.Getenv("ZCODE_TOOL_RESULT_IMAGES") == "1"
 }
 
 // responsesTools 把 Responses 的扁平工具定义翻成 Anthropic 的 input_schema 形状。

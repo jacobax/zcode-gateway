@@ -64,6 +64,88 @@ func TestResponsesRequestToAnthropic(t *testing.T) {
 	}
 }
 
+// 工具结果 content-part 数组：文本件拼接是历史行为；input_image 在
+// ZCODE_TOOL_RESULT_IMAGES=1 时翻成 image block（TriDefender/zcode-api
+// 31f4d6e 同款修复），默认关闭维持丢图老行为。
+func TestResponsesToolOutputContentParts(t *testing.T) {
+	dataURL := "data:image/png;base64,aGVsbG8="
+	parts := []any{
+		map[string]any{"type": "input_text", "text": "Read image file: s.png"},
+		map[string]any{"type": "input_image", "image_url": dataURL},
+	}
+	request := func(output any) map[string]any {
+		return map[string]any{"input": []any{
+			map[string]any{"type": "function_call", "call_id": "call_1", "name": "read_file", "arguments": `{"path":"s.png"}`},
+			map[string]any{"type": "function_call_output", "call_id": "call_1", "output": output},
+		}}
+	}
+	toolResult := func(t *testing.T, out map[string]any) map[string]any {
+		t.Helper()
+		messages, _ := out["messages"].([]any)
+		if len(messages) != 2 {
+			t.Fatalf("want 2 messages (assistant tool_use, user tool_result), got %d: %#v", len(messages), messages)
+		}
+		blocks, _ := messages[1].(map[string]any)["content"].([]any)
+		if len(blocks) != 1 {
+			t.Fatalf("tool_result should carry exactly one block: %#v", messages[1])
+		}
+		result, _ := blocks[0].(map[string]any)
+		if result["type"] != "tool_result" {
+			t.Fatalf("want tool_result block, got %#v", result)
+		}
+		return result
+	}
+
+	// 灰度关闭（默认）：与历史行为一致，纯文本、丢图。
+	t.Setenv("ZCODE_TOOL_RESULT_IMAGES", "")
+	out, err := responsesRequestToAnthropic(request(parts))
+	if err != nil {
+		t.Fatalf("convert failed: %v", err)
+	}
+	if content := toolResult(t, out)["content"]; content != "Read image file: s.png" {
+		t.Fatalf("images off: tool_result content should stay a plain string, got %#v", content)
+	}
+
+	// 灰度开启：text + image block，data URI 解出 media_type 与 payload。
+	t.Setenv("ZCODE_TOOL_RESULT_IMAGES", "1")
+	out, err = responsesRequestToAnthropic(request(parts))
+	if err != nil {
+		t.Fatalf("convert failed: %v", err)
+	}
+	content, _ := toolResult(t, out)["content"].([]any)
+	if len(content) != 2 {
+		t.Fatalf("images on: want text+image blocks, got %#v", content)
+	}
+	if content[0].(map[string]any)["type"] != "text" {
+		t.Fatalf("first block should be text: %#v", content[0])
+	}
+	image := content[1].(map[string]any)
+	if image["type"] != "image" {
+		t.Fatalf("second block should be image: %#v", image)
+	}
+	source := image["source"].(map[string]any)
+	if source["media_type"] != "image/png" || source["data"] != "aGVsbG8=" {
+		t.Fatalf("image source not decoded from data URI: %#v", source)
+	}
+}
+
+// 结构化对象输出不再变空串：序列化成 JSON 字符串。
+func TestResponsesToolOutputStructured(t *testing.T) {
+	out, err := responsesRequestToAnthropic(map[string]any{"input": []any{
+		map[string]any{"type": "function_call", "call_id": "call_1", "name": "get_data", "arguments": `{}`},
+		map[string]any{"type": "function_call_output", "call_id": "call_1", "output": map[string]any{"rows": 3, "ok": true}},
+	}})
+	if err != nil {
+		t.Fatalf("convert failed: %v", err)
+	}
+	messages, _ := out["messages"].([]any)
+	blocks, _ := messages[1].(map[string]any)["content"].([]any)
+	result := blocks[0].(map[string]any)
+	if result["content"] != `{"ok":true,"rows":3}` {
+		t.Fatalf("structured output should stringify, got %#v", result["content"])
+	}
+}
+
 // 字符串 input 也要能用。
 func TestResponsesStringInput(t *testing.T) {
 	out, err := responsesRequestToAnthropic(map[string]any{"input": "hello there"})

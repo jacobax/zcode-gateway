@@ -216,6 +216,16 @@ func TestClassifyUpstream(t *testing.T) {
 			},
 		},
 		{
+			name: "3008 user 并发上限：400 承载也要短退避重试", status: 400,
+			header: withRetryAfter(""),
+			body:   `{"code":3008,"msg":"user concurrency limit exceeded"}`,
+			check: func(t *testing.T, v upstreamVerdict) {
+				if !v.Retry || !v.ModelScoped || v.Cooldown != 0 || v.Wait != modelBusyRetryAfter {
+					t.Fatalf("3008 should back off briefly without cooling: %#v", v)
+				}
+			},
+		},
+		{
 			name: "error.type 里的业务码也要认", status: 400,
 			header: withRetryAfter(""),
 			body:   `{"error":{"type":"1113","message":"no resource pack"}}`,

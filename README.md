@@ -163,6 +163,7 @@ go build -trimpath -ldflags="-s -w" -o zcode-gateway .
 | `ZCODE_ADMIN_PASSWORD` | 随机生成 | 面板密码**初始值**；面板里改过后以面板为准 |
 | `ZCODE_APP_VERSION` | `3.16.3` | 模拟的 ZCode 客户端版本（UA 与 `X-ZCode-App-Version` 等身份头都取它）。**升级前必须做单账号 A/B 验证**：2026-11-07 实测 3.17.2 直接吃 405/3012，见 `OPERATIONS.md` 第 10 条坑 |
 | `ZCODE_SYSTEM_SHAPE` | 空 | `3`：把 system 补成 3 块（客户端没带 system 时补官方 harness 文案）；`317`：整套切到 ZCode 3.17.2 形态（三段官方提示词 + 官方 CLI 身份头 + 版本号自动 3.17.2），实测 200，默认关。详见 `OPERATIONS.md` 第 10 条 |
+| `ZCODE_TOOL_RESULT_IMAGES` | 空 | `1` 时把 /v1/responses 工具结果里的 `input_image` 翻成 `tool_result` image block 发给上游（只收 data URI）；默认关——给上游加新 block 形态先灰度。详见 `OPERATIONS.md` 第 29 条 |
 | `ZCODE_PASSTHROUGH_BETA` | 空 | 设成 `1` 时把客户端的 `anthropic-beta` 整串透传（排查用）；默认只放行白名单（`mid-conversation-system`） |
 | `ZCODE_UPSTREAM` | 空 | 覆盖**模型转发端点**的整条 URL（端到端测试用它指向 httptest）；不影响额度/活动/OAuth |
 | `ZCODE_UPSTREAM_BASE` | `https://zcode.z.ai` | 额度/活动/OAuth 这一族接口的根地址，自建镜像时改它 |
