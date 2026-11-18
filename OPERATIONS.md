@@ -475,7 +475,7 @@ TLS）→ CONNECT → 对目标再做一次 TLS → 发 `GET /api/v1/client/conf
     都改用 `Quota.Models` 分桶数据（`quotaModelExhausted` / `modelRemaining`），
     快照缺条目按「未知」放行，绝不过滤空池子。
 
-28. **3008 也是并发准入族**（2026-11-15 吸收，dengyie 2.7.44 / hj01857655
+28. **3008 也是并发准入族**（2026-11-18 吸收，dengyie 2.7.44 / hj01857655
     双源确认）。3008 是 **user 级并发上限**（同一账号并发挤爆），语义与
     3009/3010 同族：账号没坏。原来它是未知码——若上游用 400 承载，会落进
     「不重试」直接甩给客户端，且不记 `tried` 原号无退避连打。现在与
@@ -485,7 +485,7 @@ TLS）→ CONNECT → 对目标再做一次 TLS → 发 `GET /api/v1/client/conf
     指数退避（3/6/12/24/30s）」没吸收：它有 935 次重试的生产数据支撑，
     我们没有；等自己的日志出现 3008 且分布证明白等再议。
 
-29. **`/v1/responses` 工具结果的 content-part 数组**（2026-11-15 吸收，
+29. **`/v1/responses` 工具结果的 content-part 数组**（2026-11-18 吸收，
     TriDefender/zcode-api 31f4d6e 同款修复）。Responses 规范允许
     `function_call_output.output` 是数组：`input_text`/`input_image` 混排
     （工具回图给模型看截图）。原实现只认 text/content 键——图片静默丢弃、
@@ -494,6 +494,15 @@ TLS）→ CONNECT → 对目标再做一次 TLS → 发 `GET /api/v1/client/conf
     image block（复用 `imageBlock`，只收 data URI），**默认关**——给上游
     加新 block 形态必须先灰度，生产开一轮无异常再议默认值。认不出的件
     降级成 JSON 文本，内容不丢。
+
+30. **多礼包可同时挂，整号跳过的语义是「全部拥有」**（2026-11-18 吸收，
+    magpie 上游插件源码 packages/zcode #503）。ZCode 的活动可同时提供多份
+    礼包（横幅、预览、可领列表）。claim job 的省流跳过原来是
+    `accountOwnsAny`——拥有礼包 A 的号在礼包 B 还可领时也被整号跳过，
+    B 永远领不到。改成 `accountOwnsAll`：activePlans 里每一份都拥有才跳过；
+    单礼包场景优化不变（拥有 A = 拥有全部 {A}），多礼包场景继续领下一个。
+    副作用可控：拥有部分礼包的号会多打一次 detectActivities（仅多礼包时
+    发生）。单测 `TestAccountOwnsAllClaimable` 钉住改前/改后差异。
 
 ## 出口 IP 与风控
 
@@ -506,7 +515,7 @@ TLS）→ CONNECT → 对目标再做一次 TLS → 发 `GET /api/v1/client/conf
 |---|---|
 | HE IPv6 隧道池（he-ipv6-pool） | **`zcode.z.ai` 没有 AAAA 记录**，只监听 IPv4，IPv6 出口根本到不了。实测 `getent ahostsv6` 无记录、`curl -6` 返回 000 |
 | WARP | 出口是 Cloudflare 的一个共享机房 IP，换门牌不换结构；机房段还更容易被判成代理 |
-| 把 `https://` 住宅代理直接填进 `ZCODE_PROXY_URL` | tls-client 在**代理拨号**阶段校验证书，自签且无 IP SAN 会直接失败；`WithInsecureSkipVerify` 只作用于上游 TLS，救不了这一段 |
+| 把 `https://` 住宅代理直接填进 `ZCODE_PROXY_URL` | 2026-11-18 起已解（v1.18.0）：URL 加 `?tls_insecure=1` 即可直连自签且无 IP SAN 的代理（`proxydial.go` 自定义拨号器只跳代理腿校验，上游 TLS 照常）；单代理场景不再需要 relay，多代理池轮换仍用 relay。改前的 x509 失败机制没变——不加 flag 依然报 `doesn't contain any IP SANs` |
 
 ### 实际采用：本地中继 + 住宅代理池
 
@@ -522,6 +531,25 @@ TLS）→ CONNECT → 对目标再做一次 TLS → 发 `GET /api/v1/client/conf
 
 代理池在 `/etc/zcode-relay/proxies.txt`，一行一个 `host:port`（支持 `user:pass@host:port`）。
 这批是开放代理，随时会挂——中继的体检会剔除失效的，全挂了就回 502，那一轮放弃、下一轮再来。
+
+### 单条自签 https 代理直连（2026-11-18，v1.18.0，与 relay 共存）
+
+`ZCODE_PROXY_URL` / `ZCODE_PROXY_URL_EGRESS` 支持 `https://host:port?tls_insecure=1`
+后缀：网关用自定义 CONNECT 拨号器（`proxydial.go`，tls-client v1.17.1 的
+`WithProxyDialerFactory`）只跳过**代理腿**证书校验；通往上游的 TLS 仍完整校验，
+Chrome_131 指纹不变（roundtripper 对隧道连接原样做 uTLS）。注意 tls-client
+禁止 proxy URL 与工厂并存（client.go:160），flag 条目只挂工厂、URL 闭包带入。
+
+共存分工：**claim 通道（`ZCODE_PROXY_URL_CLAIM`）继续 relay→住宅池轮换**
+（领取需要 IP 轮换躲 3012，relay 的本职）；单条自签代理直连用 flag，不再垫
+relay。凭据照旧写在 URL userinfo 里，拨号器翻成 `Proxy-Authorization`。
+
+aws3 实测（71.43.26.234:443，自签 CN=YH-WIN64N4、无任何 SAN）：flag 开 →
+模型请求 429+`{"code":1005}` 带新鲜上游 logid（全链路打通）；flag 关 →
+`x509: cannot validate certificate for ... doesn't contain any IP SANs`
+（改前行为）。单测 `TestProxyTLSInsecure` 四态钉住：阴性（默认必须失败）、
+正向（flag 打通）、凭据转发、工厂守卫（非 flag 条目拒绝接管）。
+
 ## 网关出口（代理池要不要兼作出口）
 
 结论：**默认别开**。

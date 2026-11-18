@@ -2,6 +2,33 @@ package main
 
 import "testing"
 
+// accountOwnsAll 的跳过语义：拥有**全部**可领套餐才整号跳过。
+// 改前是 accountOwnsAny（拥有任意一个就跳）——多礼包（magpie 上游插件
+// #503：横幅/预览/可领列表可同时挂多个）下，领了 A 的号连 B 也领不到。
+func TestAccountOwnsAllClaimable(t *testing.T) {
+	acc := &Account{Quota: Quota{
+		Plans:   []QuotaPlan{{PlanID: "gift-a"}},
+		Pending: []QuotaPending{{PlanID: "gift-c"}},
+	}}
+
+	// 改前行为（any）：拥有 A → 连 B 一起跳过，B 永远轮不到。
+	// 改后：A、B 都可领时不跳过，B 继续领。
+	if accountOwnsAll(acc, map[string]bool{"gift-a": true, "gift-b": true}) {
+		t.Fatal("拥有 A（和 pending C）但 B 可领：不应整号跳过")
+	}
+	// 单礼包场景省流优化不变：拥有 A、可领集合就是 {A} → 跳过。
+	if !accountOwnsAll(acc, map[string]bool{"gift-a": true}) {
+		t.Fatal("单礼包场景：拥有 A 就应跳过")
+	}
+	if accountOwnsAll(acc, map[string]bool{"gift-b": true}) {
+		t.Fatal("不拥有 B：不应跳过")
+	}
+	// pending（已领未生效）也算拥有。
+	if !accountOwnsAll(acc, map[string]bool{"gift-a": true, "gift-c": true}) {
+		t.Fatal("A 已领 + C pending：应视为全部拥有")
+	}
+}
+
 func TestNormalizeClaimWindow(t *testing.T) {
 	cases := []struct {
 		in   string

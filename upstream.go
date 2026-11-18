@@ -69,7 +69,16 @@ func newTLSClient(proxyURL string) (tls_client.HttpClient, error) {
 		tls_client.WithTimeoutSeconds(300),
 	}
 	if proxyURL != "" {
-		options = append(options, tls_client.WithProxyUrl(proxyURL))
+		// tls-client v1.17.1 禁止 proxy URL 与自定义拨号器工厂并存
+		//（client.go:160 校验：cannot set both），所以 flag 条目只挂工厂、
+		// URL 闭包带入；其余条目仍走 WithProxyUrl → 库存 connectDialer
+		//（代理腿严格校验）。claim 通道继续 relay→住宅池，配置不变即行为不变。
+		if u, err := url.Parse(proxyURL); err == nil &&
+			u.Scheme == "https" && u.Query().Get("tls_insecure") == "1" {
+			options = append(options, tls_client.WithProxyDialerFactory(flaggedProxyDialerFactory(proxyURL)))
+		} else {
+			options = append(options, tls_client.WithProxyUrl(proxyURL))
+		}
 	}
 	return tls_client.NewHttpClient(tls_client.NewNoopLogger(), options...)
 }

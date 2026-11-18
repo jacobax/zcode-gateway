@@ -387,12 +387,12 @@ func (s *Server) startClaimJob(accountIDs []string) error {
 		}
 		attempted := 0
 		for _, acc := range targets {
-			if len(activePlans) > 0 && accountOwnsAny(acc, activePlans) {
+			if len(activePlans) > 0 && accountOwnsAll(acc, activePlans) {
 				job.mu.Lock()
 				job.done++
 				job.results = append(job.results, claimOutcome{
 					AccountID: acc.ID, Label: acc.Label,
-					Skipped: true, Message: "已经领过这个套餐",
+					Skipped: true, Message: "已经领过全部可领套餐",
 				})
 				job.mu.Unlock()
 				continue
@@ -428,19 +428,26 @@ func (s *Server) startClaimJob(accountIDs []string) error {
 	return nil
 }
 
-// accountOwnsAny 本地判断这个号是不是已经有其中某份套餐了（含待生效）。
-func accountOwnsAny(acc *Account, plans map[string]bool) bool {
+// accountOwnsAll 判断账号是否已拥有 activePlans 里的**每一个**套餐——
+// 只有全部拥有才值得整号跳过。曾经是「拥有任意一个就跳过」：ZCode 会同时
+// 挂多个礼包（活动横幅、预览、可领列表；magpie 上游插件 #503 同款语义，
+// 2026-11-18 对标吸收），拥有 A 的账号在 B 还可领时也被整号跳过，B 就永远
+// 轮不到。改成全部拥有才跳：单礼包场景的省流优化不变（拥有 A = 拥有全部
+// {A}），多礼包场景能继续领下一个。
+func accountOwnsAll(acc *Account, plans map[string]bool) bool {
+	owned := map[string]bool{}
 	for _, p := range acc.Quota.Plans {
-		if plans[p.PlanID] {
-			return true
-		}
+		owned[p.PlanID] = true
 	}
 	for _, p := range acc.Quota.Pending {
-		if plans[p.PlanID] {
-			return true
+		owned[p.PlanID] = true
+	}
+	for id := range plans {
+		if !owned[id] {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 func mapKeys(m map[string]bool) []string {
