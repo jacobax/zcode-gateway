@@ -169,7 +169,6 @@ go build -trimpath -ldflags="-s -w" -o zcode-gateway .
 | `ZCODE_UPSTREAM_BASE` | `https://zcode.z.ai` | 额度/活动/OAuth 这一族接口的根地址，自建镜像时改它 |
 | `ZCODE_PROXY_URL_CLAIM` | 空 | 只给领取/活动用的出口（通常指向本地中继） |
 | `ZCODE_PROXY_URL_EGRESS` | 同 `CLAIM` | 模型流量可选出口；面板「网关出口」决定用不用 |
-| `ZCODE_PROXY_URL` | 空 | 主流量出口（模型请求）。`https://` 代理可加 `?tls_insecure=1` 直连自签且无 IP SAN 的裸 IP 代理——只跳代理腿证书校验，上游 TLS 照常、指纹不变，单代理场景不再需要本地 relay；详见 `OPERATIONS.md` 出口一节 |
 | `ZCODE_POOL_TOPN` | `5` | 加权选号的短名单大小 |
 | `ZCODE_RETRY_WAIT_SEC` | `20` | 429 原地重试的总预算，0 表示不等待 |
 | `ZCODE_REQUEST_TIMEOUT_SEC` | `600` | 单个上游请求超时 |
