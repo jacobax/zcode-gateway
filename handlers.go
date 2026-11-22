@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	fhttp "github.com/bogdanfinn/fhttp"
@@ -38,6 +39,8 @@ type Server struct {
 	claim          *claimJob
 	// quotaClient 是测试注入点：nil 表示走 upstream，生产恒为 nil。
 	quotaClient HTTPDoer
+	// lastEgressRotate 是上一次成功轮换出口的 unix 秒，用于节流见 rotateEgress。
+	lastEgressRotate atomic.Int64
 }
 
 func NewServer(store *Store, upstream *Upstream, baseURL string) *Server {
@@ -741,7 +744,9 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request, opts relayOptions
 	// 把一次中继抖动摊成整池冷却——2026-11-22 实证：只跑 2 个并发，1 分钟内
 	// 20 个号被写成「第 N 次风控退避」，全部源于 egress 重试失败后拿直连的
 	// 405 结论去 applyVerdict。这里单独计数，够数就快速失败。
-	maxEgressFailures := envInt("ZCODE_EGRESS_MAX_FAILURES", 3)
+	// 累计失败达 ZCODE_EGRESS_MAX_FAILURES 才快速失败。默认给到 10 而不是 3：
+	// 中继抖一下不该让客户端看到 502——账号是好的，多换几个号更划算。
+	maxEgressFailures := envInt("ZCODE_EGRESS_MAX_FAILURES", 10)
 	egressFailures := 0
 	egressDown := false
 	for attempt := 0; attempt < maxAttempts; attempt++ {
@@ -976,7 +981,23 @@ func (s *Server) handleAttempt(ctx context.Context, w http.ResponseWriter, r *ht
 }
 
 // rotateEgress 让本地中继换一个出口 IP；失败不影响主流程。
+//
+// 节流是必须的：中继的 /rotate 会主动断开正在传输的隧道，高频调用会让并发
+// 请求互相打断。2026-11-22 实证——上游每次 405 都触发一次轮换，一小时 214 次，
+// 单请求耗时被拉到 47~54 秒，并产生成片 502；而中继自己的 TTL 是 3000 秒，
+// 网关这边按请求轮换纯属负收益。间隔由 ZCODE_EGRESS_ROTATE_MIN_SEC 控制，
+// 设 0 表示不节流（仅排障时用）——所以要 allow-zero 版本，envInt 会把 0 当非法。
 func (s *Server) rotateEgress(ctx context.Context) {
+	minGap := envSecondsAllowZero("ZCODE_EGRESS_ROTATE_MIN_SEC", 30)
+	now := time.Now().Unix()
+	if minGap > 0 {
+		last := s.lastEgressRotate.Load()
+		if last != 0 && now-last < int64(minGap/time.Second) {
+			return
+		}
+	}
+	// 先占位再发请求：并发的多个 405 不应同时各发一次轮换。
+	s.lastEgressRotate.Store(now)
 	base := envOr("ZCODE_RELAY_ADMIN", "http://127.0.0.1:3129")
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/rotate", nil)
 	if err != nil {

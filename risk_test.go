@@ -1,6 +1,10 @@
 package main
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -116,5 +120,55 @@ func TestClassifyUpstream405SplitsWAFFromRisk(t *testing.T) {
 	}
 	if biz.InfraBlock {
 		t.Fatal("业务 3012 不是 InfraBlock")
+	}
+}
+
+// rotateEgress 必须节流：中继的 /rotate 会断开正在传输的隧道。
+// 2026-11-22 实证：上游每次 405 都触发轮换，一小时 214 次，单请求耗时被拉到
+// 47~54 秒并产生成片 502。
+func TestRotateEgressThrottled(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	t.Setenv("ZCODE_RELAY_ADMIN", srv.URL)
+	t.Setenv("ZCODE_EGRESS_ROTATE_MIN_SEC", "30")
+
+	s := &Server{}
+	for i := 0; i < 5; i++ {
+		s.rotateEgress(context.Background())
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("30s 窗口内 5 次调用只应打出 1 次轮换，实际 %d", got)
+	}
+}
+
+// 拨回时间戳后应允许再次轮换；设 0 表示完全不节流（仅排障用）。
+func TestRotateEgressWindowExpires(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	t.Setenv("ZCODE_RELAY_ADMIN", srv.URL)
+	t.Setenv("ZCODE_EGRESS_ROTATE_MIN_SEC", "30")
+
+	s := &Server{}
+	s.rotateEgress(context.Background())
+	s.lastEgressRotate.Store(time.Now().Add(-31 * time.Second).Unix())
+	s.rotateEgress(context.Background())
+	if got := atomic.LoadInt32(&hits); got != 2 {
+		t.Fatalf("窗口过期后应再轮换一次（共 2 次），实际 %d", got)
+	}
+
+	t.Setenv("ZCODE_EGRESS_ROTATE_MIN_SEC", "0")
+	s2 := &Server{}
+	s2.rotateEgress(context.Background())
+	s2.rotateEgress(context.Background())
+	if got := atomic.LoadInt32(&hits); got != 4 {
+		t.Fatalf("MIN_SEC=0 时不应节流（累计 4 次），实际 %d", got)
 	}
 }
