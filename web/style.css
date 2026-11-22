@@ -295,6 +295,13 @@ textarea.input { height: auto; padding: 9px 11px; resize: vertical; line-height:
 .alert { margin-top: 12px; padding: 9px 12px; border-radius: var(--radius-sm); font-size: 12px; line-height: 1.5; }
 .alert.error { background: var(--error-soft); color: #cf1322; }
 .alert.info { background: var(--primary-soft); color: #0958d9; }
+.alert.warn { background: var(--warning-soft); color: #d48806; }
+/* 概览页顶部的并发风险提示：常驻，但用克制配色，不要盖过数据卡片。 */
+#view-overview > .alert.warn { margin-top: 0; margin-bottom: 16px; }
+.alert.warn .alert-title { font-weight: 600; }
+.alert.warn ul { margin: 6px 0 0; padding-left: 18px; }
+.alert.warn li { margin-top: 2px; }
+.alert.warn code { font-family: var(--mono, monospace); }
 .toast {
   position: fixed; right: 24px; bottom: 24px; z-index: 80;
   max-width: 360px; padding: 10px 14px; border-radius: var(--radius-sm);

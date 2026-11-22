@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ZCode Gateway</title>
-<link rel="stylesheet" href="/style.css?v=24">
+<link rel="stylesheet" href="/style.css?v=25">
 <script>
   // 夜间模式：在首屏渲染前决定主题，避免闪白
   try {
@@ -64,6 +64,16 @@
     </header>
 
     <section class="view" id="view-overview">
+      <!-- 并发风险提示：2026-11-22 实测得出的硬结论，常驻在最显眼处。 -->
+      <div class="alert warn" id="concurrency-warn">
+        <div class="alert-title">多路并发有风险：上游按出口 IP 限速</div>
+        <ul>
+          <li>同一出口 IP 上持续多路并发，几分钟内就会被阿里云 WAF 挡成 <code>HTTP 405</code>
+              （返回 HTML 页面，请求到不了业务层）。封禁期内<b>所有账号</b>都不可用，与账号本身无关。</li>
+          <li>2026-11-22 实测：<b>2 路</b>并发持续 10 分钟即可触发，封禁持续 30 分钟以上。</li>
+          <li>建议 <b>≤ 2 路</b>并发。多子代理 / 批量任务请<b>串行或分批</b>跑，不要同时开满。</li>
+        </ul>
+      </div>
       <div class="stat-grid">
         <div class="stat-card">
           <div class="stat-label">账号</div>
