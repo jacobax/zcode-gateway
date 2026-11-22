@@ -66,3 +66,55 @@ func TestEnvIntFallsBackOnBadValues(t *testing.T) {
 		t.Fatalf("5 -> %d, want 5", got)
 	}
 }
+
+// 2026-11-22 第二次实证：直连 aws1 被阿里云 WAF 挡回 HTML 405，body 里没有
+// 业务码，于是 Reason 落成 fallback 文案「上游风控 3012」，20 个号被记 strike。
+// 判定必须把「没进业务层的拦截页」和「业务层 3012」分开。
+const aliyunWAF405 = `<!doctypehtml><html lang="zh-cn"><meta charset="utf-8">` +
+	`<meta name="data-spm" content="a3c0e"><title>405</title>` +
+	`<style>a,body{margin:0}</style><body><h2>405</h2></body></html>`
+
+func TestIsUpstreamWAFBlock(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"阿里云 WAF 405 页面", aliyunWAF405, true},
+		{"带空格的 doctype", "<!DOCTYPE html><html><title>405</title></html>", true},
+		{"业务 3012 JSON", `{"code":3012,"msg":"This client is not supported. Please use the official ZCode client."}`, false},
+		{"业务账号风控 JSON", `{"code":3012,"msg":"账号或者网络环境存在异常"}`, false},
+		{"正常响应", `{"content":[{"type":"text","text":"hi"}]}`, false},
+		{"空 body", ``, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isUpstreamWAFBlock([]byte(c.body)); got != c.want {
+				t.Fatalf("isUpstreamWAFBlock(%q) = %v, want %v", c.body, got, c.want)
+			}
+		})
+	}
+}
+
+// WAF 405 走 InfraBlock：要 Retry（换出口/换号还有救），但绝不能 Risk
+// （Risk 会 BumpRiskStrikes + MarkExhausted，把 WAF 抖动摊成账号冷却）。
+func TestClassifyUpstream405SplitsWAFFromRisk(t *testing.T) {
+	waf := classifyUpstream(405, nil, []byte(aliyunWAF405))
+	if !waf.Retry {
+		t.Fatal("WAF 405 应该 Retry")
+	}
+	if !waf.InfraBlock {
+		t.Fatal("WAF 405 应该判 InfraBlock")
+	}
+	if waf.Risk {
+		t.Fatal("WAF 405 不能判 Risk：那会给账号记 strike")
+	}
+
+	biz := classifyUpstream(405, nil, []byte(`{"code":3012,"msg":"账号或者网络环境存在异常"}`))
+	if !biz.Risk {
+		t.Fatal("业务 3012 应该判 Risk")
+	}
+	if biz.InfraBlock {
+		t.Fatal("业务 3012 不是 InfraBlock")
+	}
+}

@@ -25,7 +25,11 @@ type upstreamVerdict struct {
 	Risk        bool // 3012 类风控：冷却时长按 strike 指数退避，由调用方算
 	ModelScoped bool // 只影响这个模型，不动账号
 	RateLimited bool
-	Reason      string
+	// InfraBlock 表示请求在网关/WAF 层就被拒了，根本没进业务层。这类拒绝
+	// 与账号无关，记 strike 只会把一次 WAF 抖动摊成整池冷却；换出口或换号
+	// 可以继续，但不动账号状态。
+	InfraBlock bool
+	Reason     string
 }
 
 const (
@@ -188,6 +192,16 @@ func classifyUpstream(status int, headers headerGetter, body []byte) upstreamVer
 		return upstreamVerdict{Retry: true, Disable: true, Cooldown: authCooldown, Reason: firstNonEmpty(env.Msg, "认证失败")}
 
 	case status == 405:
+		// 405 有两种来源，处置相反：
+		//   WAF 的 HTML 页面 = 请求在网关层就被拦了，没进业务层，与账号无关；
+		//   业务 JSON 3012 = 账号/形态风控，换号是对的。
+		// 早先一律按 Risk 处理，于是阿里云 WAF 的一次 HTML 405 就能给账号记一笔
+		// strike（2026-11-22 实证：20 个号的「第 N 次风控退避」全是 WAF 页面，
+		// Reason 落成 fallback 文案「上游风控 3012」即 body 里没有 msg）。
+		if isUpstreamWAFBlock(body) {
+			return upstreamVerdict{Retry: true, InfraBlock: true,
+				Reason: "上游 WAF 405（请求未到业务层）"}
+		}
 		// 风控不原地重试：对已被标记的账号持续施压只会加剧。
 		return upstreamVerdict{Retry: true, Risk: true, Reason: firstNonEmpty(env.Msg, "上游风控 3012")}
 
@@ -334,6 +348,38 @@ func isClientShapeReject(body []byte) bool {
 	text := strings.ToLower(string(body))
 	for _, marker := range clientShapeRejectMarkers {
 		if strings.Contains(text, strings.ToLower(marker)) {
+			return true
+		}
+	}
+	return false
+}
+
+// wafBlockMarkers 是网关/WAF 层拒绝页面的特征。阿里云的 405 页面长这样：
+// <!doctypehtml><html lang="zh-cn">…<meta name="data-spm" content="a3c0e">
+// <title>405</title>…，正文里没有任何业务码，也没进业务层。
+var wafBlockMarkers = []string{
+	"<!doctypehtml",
+	"<!doctype html",
+	"<title>405</title>",
+	"data-spm",
+}
+
+// isUpstreamWAFBlock 判断响应是不是网关/WAF 的拦截页而不是业务响应。
+// 业务响应一定是 JSON；HTML 只可能来自中间层。长度限制只是为了不在 2MB
+// 的错误体上白做一次小写转换。
+func isUpstreamWAFBlock(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	if len(body) > 8192 {
+		body = body[:8192]
+	}
+	text := strings.ToLower(string(body))
+	if strings.HasPrefix(strings.TrimSpace(text), "{") {
+		return false
+	}
+	for _, marker := range wafBlockMarkers {
+		if strings.Contains(text, marker) {
 			return true
 		}
 	}

@@ -353,10 +353,14 @@ func (s *Server) handleAccountByID(w http.ResponseWriter, r *http.Request) {
 		s.pool.signal()
 		writeJSON(w, 200, map[string]any{"ok": true, "profile": profile})
 	case r.Method == http.MethodPost && action == "clear-cooldown":
+		// 一并清 RiskStrikes：只清 ExhaustedUntil 会让账号停在「第 N 次」的
+		// 退避档位上，下一次 3012 直接从 30m/1h 起跳（2026-11-22 实测：
+		// 清过冷却的号下一次风控就写「第 2 次，冷却 30m0s」）。
 		if !s.store.UpdateAccount(id, func(a *Account) {
 			a.ExhaustedUntil = 0
 			a.LastError = ""
 			a.LastErrorAt = 0
+			a.RiskStrikes = 0
 		}) {
 			writeError(w, 404, "account not found")
 			return
@@ -733,6 +737,13 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request, opts relayOptions
 	riskSwitches := 0
 	shapeReject := false
 	riskCapped := false
+	// 兜底出口自己失败（拨号/TLS/中继抖动）与账号无关。把它记到账号账上会
+	// 把一次中继抖动摊成整池冷却——2026-11-22 实证：只跑 2 个并发，1 分钟内
+	// 20 个号被写成「第 N 次风控退避」，全部源于 egress 重试失败后拿直连的
+	// 405 结论去 applyVerdict。这里单独计数，够数就快速失败。
+	maxEgressFailures := envInt("ZCODE_EGRESS_MAX_FAILURES", 3)
+	egressFailures := 0
+	egressDown := false
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		acc, release, err := s.pool.AcquireExcludingModel(r.Context(), sessionKey, tried, opts.model)
 		if err != nil {
@@ -773,13 +784,21 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request, opts relayOptions
 			}
 			// 兜底：直连被风控或限流时，换住宅出口再打同一个号一次。
 			// 只有真失败才付这个延迟，正常请求仍然直连。
-			if egressMode == "fallback" && !viaEgress && (verdict.Risk || verdict.RateLimited) {
+			if egressMode == "fallback" && !viaEgress && (verdict.Risk || verdict.RateLimited || verdict.InfraBlock) {
 				if rotateEgress {
 					s.rotateEgress(ctx)
 				}
 				resp2, reqBytes2, err2 := s.ForwardViaEgress(ctx, acc, opts.body, clientHeaders, sessionKey)
 				if err2 != nil {
-					s.applyVerdict(acc, verdict, opts.model)
+					// 出口故障不是账号故障：这里绝不能 applyVerdict。直连那次
+					// 的结论（多半是 WAF 405）会被记成该号的风控 strike，
+					// 而这条路径又不消耗 riskSwitches，于是一个请求就能顺着
+					// 轮转把几十个号逐个写成冷却。
+					lastErr = err2
+					egressFailures++
+					if egressFailures >= maxEgressFailures {
+						egressDown = true
+					}
 					return
 				}
 				verdict, done, lastStatus, lastBody = s.handleAttempt(ctx, w, r, acc, resp2, opts, sessionKey, len(reqBytes2), start)
@@ -819,6 +838,13 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request, opts relayOptions
 			opts.writeError(w, 502,
 				fmt.Sprintf("上游风控 3012：连续 %d 个账号被拒，已停止轮转（避免打挂全池）。"+
 					"请检查：出口 IP 是否被多账号共用、并发数、system 形态。", riskSwitches))
+			return
+		}
+		if egressDown {
+			opts.writeError(w, 502,
+				fmt.Sprintf("兜底出口连续 %d 次失败，直连被拒后无法重试，故快速失败："+
+					"检查 ZCODE_PROXY_URL_EGRESS / 本地中继（%v）。账号未被冷却。",
+					egressFailures, lastErr))
 			return
 		}
 		if r.Context().Err() != nil {
@@ -935,6 +961,13 @@ func (s *Server) handleAttempt(ctx context.Context, w http.ResponseWriter, r *ht
 	resp.Body.Close()
 	verdict := classifyUpstream(resp.StatusCode, resp.Header, data)
 	if verdict.Retry {
+		// 中间失败必须留痕。换号后客户端可能最终拿到 200，于是这次尝试在
+		// 日志表和 journal 里都不存在——2026-11-22 排查时整整 20 次账号冷却
+		// 找不到任何对应的请求记录，只能靠反推判定。
+		s.recordLog(acc, opts.model, opts.stream, resp.StatusCode, false, time.Since(start),
+			Usage{}, streamTiming{}, resp.Header.Get("x-request-id"), sessionKey, r,
+			opts.clientReqBody, truncate(string(data), 4096), reqBytes, len(data),
+			"换号重试："+verdict.Reason)
 		return verdict, false, resp.StatusCode, data
 	}
 	s.recordLog(acc, opts.model, opts.stream, resp.StatusCode, false, time.Since(start), Usage{}, streamTiming{}, resp.Header.Get("x-request-id"), sessionKey, r, opts.clientReqBody, truncate(string(data), 8192), reqBytes, len(data), verdict.Reason)
@@ -964,6 +997,10 @@ func (s *Server) applyVerdict(acc *Account, v upstreamVerdict, model string) {
 	case v.Disable:
 		s.store.DisableAccount(acc.ID, v.Reason)
 		s.recordAccountEvent(acc, "已停用", v.Reason)
+	case v.InfraBlock:
+		// 网关/WAF 层拒绝：请求没进业务层，账号状态一概不动（连 LastError
+		// 都不写，否则面板会把一次 WAF 抖动显示成账号故障）。
+		return
 	case v.Risk:
 		strikes := s.store.BumpRiskStrikes(acc.ID)
 		cooldown := riskCooldownFor(strikes)

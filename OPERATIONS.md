@@ -564,9 +564,59 @@ TLS）→ CONNECT → 对目标再做一次 TLS → 发 `GET /api/v1/client/conf
    高 + 池内 IP 本身脏，反而更容易吃 3012；保持 `fallback`（直连出事才换住宅出口重打一次）。
 2. **出事先清冷却，不要重启**：`ExhaustedUntil` 是持久化的，重启不清。
    面板按号点「清除冷却」，或 `POST /api/accounts/<id>/clear-cooldown`
-   （清 `ExhaustedUntil` + `LastError` + 模型态）。
+   （清 `ExhaustedUntil` + `LastError` + **`RiskStrikes`** + 模型态）。不清 strike 的话
+   账号会停在「第 N 次」的退避档位上，下一次 3012 直接从 30m/1h 起跳——2026-11-22
+   实测：清过冷却的号下一次风控直接写「第 2 次，冷却 30m0s」。已经自然恢复（不在
+   「冷却中」）但 `riskStrikes>0` 的号也要对全部号跑一遍才能清干净。
 3. **看错误先看 405 不是 3012**：上游把 3012 装在 HTTP 405 里，日志里 grep `3012` 是 0 命中。
+   现在换号重试的中间失败也会落一条 `ok=false` 的日志（`error` 以 `换号重试：` 开头），
+   不再只存在于内存里。
 
+
+
+### 2026-11-22 第二次复盘：唯一真凶是 egress 失败路径，不是并发
+
+第一轮护栏上线后，用户把并发降到 **2 个子代理**，仍然 1 分钟内 20 个号进冷却。日志层
+证据有两处「看不见」：
+
+- `/api/logs` 默认排除 `mode=account`，要 `?status=account` 才看得到账号事件；
+- 换号重试的中间失败**既不写日志表也不进 journal**（journal 只记客户端最终状态码），
+  所以 07:50–08:00 那一分钟里客户端 25 个请求全是 200，而同期 20 个号被写了风控退避。
+
+用真实账号做了直连 / 住宅代理的对照实验（同一 JWT、同一身份头），结果两种 405 完全不同：
+
+| 出口 | 状态 | 响应体 |
+|---|---|---|
+| 直连 aws1 | 405 | **阿里云 WAF 的 HTML 页面**（`<!doctypehtml>` + `data-spm` + `<title>405</title>`），0.3s 返回，没进业务层 |
+| 住宅中继 | 405 | 业务 JSON `{"code":3012,"msg":"This client is not supported..."}` |
+
+而账号事件里的 `Reason` 全部是字面量 `上游风控 3012`——那是 `classifyUpstream` 的 **fallback
+文案**，只在 body 里没有 `msg` 时出现，即**那 20 条全是 WAF 的 HTML 405**。完整链条：
+
+1. 直连被 WAF 挡回 HTML 405 → `classifyUpstream` 落到 `status == 405` 分支 → `Risk = true`；
+2. `Risk` 触发 `egressMode=fallback` 的住宅代理重试；
+3. 代理这一发**网络层失败**（`err2 != nil`）→ 走 `s.applyVerdict(acc, verdict)`，用的是
+   **直连那次 WAF 的结论** → `BumpRiskStrikes` + `MarkExhausted`；
+4. **这条路径不消耗 `riskSwitches`**，所以 `ZCODE_RISK_MAX_SWITCHES=3` 完全拦不住它——
+   一个客户端请求就能顺着轮转写到 `maxAttempts = len(accounts)+1`。
+
+2 个并发 = 2 × 43 次尝试机会，足够把 20 个号打掉。并发从来不是自变量。
+
+修复（`classify.go` / `handlers.go`，测试在 `risk_test.go`）：
+
+| 改动 | 行为 |
+|---|---|
+| `isUpstreamWAFBlock` | 405 且 body 是 HTML（非 JSON）时判 `InfraBlock`：`Retry` 但**不 `Risk`**，`applyVerdict` 直接 return，连 `LastError` 都不写 |
+| egress 失败不记账 | `err2 != nil` 时只 `lastErr = err2` 并计数，**不再 applyVerdict**；连续失败达 `ZCODE_EGRESS_MAX_FAILURES`（默认 3）返回 502 快速失败，提示检查中继 |
+| `clear-cooldown` 清 strike | 顺带把 `RiskStrikes` 归零，避免下次风控直接跳到 30m 档 |
+| 中间失败落日志 | `handleAttempt` 的 `verdict.Retry` 分支记一条 `ok=false`、`error` 前缀 `换号重试：` 的上游尝试 |
+
+上线后实测（3 个真实请求）：每个请求先吃 1 次 WAF 405，走住宅代理后**同一个号** 2 秒内
+回 200，`riskStrikes` 全程 0，池子 42/42 可用。
+
+遗留事实：**aws1 的直连 IP 已被阿里云 WAF 拦掉**（3/3 直连必 405，代理必通）。目前靠
+`fallback` 兜住，代价是每个请求多付一次直连失败（0.3~1s）。若之后确认直连长期不可用，
+且中继带宽扛得住，再考虑切 `always`；不要因为这一条就提前切——见下一节的 RTT/脏 IP 结论。
 
 ## 网关出口（代理池要不要兼作出口）
 
