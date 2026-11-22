@@ -726,6 +726,13 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request, opts relayOptions
 		egressMode = "direct"
 	}
 	tried := map[string]bool{}
+	// 一个客户端请求最多让几个号「因风控被换掉」。没有上限时 maxAttempts =
+	// len(accounts)+1，单个坏请求能逐个毒化全池（2026-11-22 实证：6 个请求
+	// 打挂 42 个号，全池 15 分钟冷却）。ZCODE_RISK_MAX_SWITCHES 可调。
+	maxRiskSwitches := envInt("ZCODE_RISK_MAX_SWITCHES", 3)
+	riskSwitches := 0
+	shapeReject := false
+	riskCapped := false
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		acc, release, err := s.pool.AcquireExcludingModel(r.Context(), sessionKey, tried, opts.model)
 		if err != nil {
@@ -780,10 +787,40 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request, opts relayOptions
 					return
 				}
 			}
+			// 3012 分两档，处置完全相反：
+			//   形态问题（client not supported）= 构建级故障，每个号都会拒。
+			//     记账号的账毫无意义，只会把一个几分钟能修的问题摊成整池
+			//     15 分钟~24 小时指数冷却（2026-11-22 实证：6 个请求打挂 42 个号）。
+			//   账号风控 = 单号问题，换号是对的；但也要设上限，否则一个坏
+			//     客户端请求仍能逐个毒化全池。
 			if verdict.Retry {
+				if verdict.Risk && isClientShapeReject(lastBody) {
+					shapeReject = true
+					return
+				}
+				if verdict.Risk {
+					riskSwitches++
+					if riskSwitches >= maxRiskSwitches {
+						riskCapped = true
+						s.applyVerdict(acc, verdict, opts.model)
+						return
+					}
+				}
 				s.applyVerdict(acc, verdict, opts.model)
 			}
 		}()
+		if shapeReject {
+			opts.writeError(w, 400,
+				"上游拒绝当前请求形态（client not supported）：疑似 system/提示词形态或客户端版本不匹配。"+
+					"已停止换号，避免把整池打进风控冷却；修复形态后重试。")
+			return
+		}
+		if riskCapped {
+			opts.writeError(w, 502,
+				fmt.Sprintf("上游风控 3012：连续 %d 个账号被拒，已停止轮转（避免打挂全池）。"+
+					"请检查：出口 IP 是否被多账号共用、并发数、system 形态。", riskSwitches))
+			return
+		}
 		if r.Context().Err() != nil {
 			return
 		}

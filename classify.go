@@ -32,7 +32,10 @@ const (
 	authCooldown        = 30 * time.Minute
 	serverErrorCooldown = 5 * time.Minute
 	riskCooldownBase    = 15 * time.Minute
-	riskCooldownMax     = 24 * time.Hour
+	// 封顶从 24h 下调到 4h（2026-11-22）：3012 多为出口环境/并发形态问题而非
+	// 单号滥用，误伤时 24h 等于把号废一天；4h 足够让真滥用者冷却，也让误伤
+	// 当天可恢复。指数退避本身不变（15m→30m→1h→2h→4h）。
+	riskCooldownMax     = 4 * time.Hour
 	defaultRetryAfter   = 5 * time.Second
 	maxRetryAfter       = 120 * time.Second
 	modelBusyRetryAfter = time.Second
@@ -310,4 +313,29 @@ func riskCooldownFor(strikes int) time.Duration {
 		}
 	}
 	return cooldown
+}
+
+// clientShapeRejectMarkers 是「客户端形态不被支持」这一档 3012 的文案特征。
+// 与账号风控的区别至关重要：形态问题是**构建级**故障，每个号都会拒（对方
+// 文档原话 "a build problem fails on every account"），把号一个个打进冷却
+// 只会把一个 5 分钟的可修问题摊成整池 15 分钟~24 小时的指数退避。
+var clientShapeRejectMarkers = []string{
+	"not supported",
+	"official zcode client",
+	"不支持的客户端",
+	"请使用官方",
+}
+
+// isClientShapeReject 判断这次的 3012 是否属于形态/构建问题而非账号风控。
+func isClientShapeReject(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	text := strings.ToLower(string(body))
+	for _, marker := range clientShapeRejectMarkers {
+		if strings.Contains(text, strings.ToLower(marker)) {
+			return true
+		}
+	}
+	return false
 }

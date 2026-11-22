@@ -37,6 +37,16 @@ func envSecondsAllowZero(key string, fallback int) time.Duration {
 	return time.Duration(fallback) * time.Second
 }
 
+// envInt 读整型环境变量；缺失或非法时用 fallback（值必须 >0 才算数）。
+func envInt(key string, fallback int) int {
+	if raw := strings.TrimSpace(os.Getenv(key)); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			return n
+		}
+	}
+	return fallback
+}
+
 func envOr(key, fallback string) string {
 	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
 		return v

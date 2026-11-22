@@ -532,6 +532,42 @@ TLS）→ CONNECT → 对目标再做一次 TLS → 发 `GET /api/v1/client/conf
 代理池在 `/etc/zcode-relay/proxies.txt`，一行一个 `host:port`（支持 `user:pass@host:port`）。
 这批是开放代理，随时会挂——中继的体检会剔除失效的，全挂了就回 502，那一轮放弃、下一轮再来。
 
+### 2026-11-22 事故：8 并发打挂全池，以及两道护栏
+
+现象：客户端起 8 个子代理并发，06:33 起 `POST /v1/messages` 开始 405（3012 装在 405 里），
+06:36 起全变 503 `no available account`，`/api/accounts` 里 **42/42 全部 `lastError=上游风控 3012`**。
+24 小时里此前有 531 次 200，说明不是号坏了，是被一件事一起打挂的。
+
+两层原因，必须分开看：
+
+1. **触发面**：模型请求直连 aws1（只有 billing/claim 走中继），42 个号共用同一个机房 IP。
+   8 个并发 = 同一个 IP 上多账号同时出网，这正是上游跨账号关联风控的典型特征
+   （同类项目 AutoZcoder 的行话：*spreading one model across every account at once
+   is what tends to get a whole pool flagged together*）。
+2. **放大面（真正的坑）**：`relay()` 的 `maxAttempts = len(accounts)+1`，且 3012 走
+   `applyVerdict` 的 `Risk` 分支 → 每个失败尝试都给该号 `BumpRiskStrikes` +
+   `MarkExhausted`（15 分钟起、逐次翻倍）。于是 **6 个坏请求顺着轮转把 42 个号逐个
+   打进冷却**，一个人的请求造成全池下线。
+
+护栏（已上线，各自有测试 `risk_test.go`）：
+
+| 护栏 | 行为 | 旋钮 |
+|---|---|---|
+| 形态问题不记账号账 | 3012 文案是 `not supported` / `官方客户端` 时判为**构建级**故障（每个号都会拒），不 strike、不冷却，直接 400 快速失败 | 无（按文案识别） |
+| 风控轮转上限 | 单个请求最多换 3 个号就停（原来是全部 42 个），返回 502 并提示检查出口/并发/形态 | `ZCODE_RISK_MAX_SWITCHES`（默认 3） |
+| 冷却封顶下调 | `riskCooldownMax` 24h → 4h，误伤当天可恢复 | 代码常量 |
+
+配套操作建议（按性价比排序）：
+
+1. **并发别一次开满**：8 路并发在单 IP 上等价于「多账号同时出网」。降到 3~4 路是最省事
+   的办法。**不要**为此把 `egressMode` 切 `always`——下一节实测结论是 `always` 因为 RTT
+   高 + 池内 IP 本身脏，反而更容易吃 3012；保持 `fallback`（直连出事才换住宅出口重打一次）。
+2. **出事先清冷却，不要重启**：`ExhaustedUntil` 是持久化的，重启不清。
+   面板按号点「清除冷却」，或 `POST /api/accounts/<id>/clear-cooldown`
+   （清 `ExhaustedUntil` + `LastError` + 模型态）。
+3. **看错误先看 405 不是 3012**：上游把 3012 装在 HTTP 405 里，日志里 grep `3012` 是 0 命中。
+
+
 ## 网关出口（代理池要不要兼作出口）
 
 结论：**默认别开**。
