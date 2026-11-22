@@ -27,6 +27,9 @@ type Upstream struct {
 	// egress 是模型流量可选的出口：指向本地中继时，等价于把住宅代理池当网关出口。
 	egressClient   tls_client.HttpClient
 	egressProxyURL string
+	// pacer 是进程级共享的发送节奏闸门，见 pacing.go。只作用于模型转发，
+	// 不影响 billing/quota/claim 这些后台调用。
+	pacer *pacer
 }
 
 func normalizeProxyURL(raw string) (string, error) {
@@ -110,6 +113,8 @@ func NewUpstream() (*Upstream, error) {
 		u.egressClient = egressClient
 		u.egressProxyURL = egressURL
 	}
+	u.pacer = newPacer(envIntAllowZero("ZCODE_PACING_MIN_MS", 150),
+		envIntAllowZero("ZCODE_PACING_MAX_MS", 400))
 	return u, nil
 }
 
@@ -378,6 +383,12 @@ func (s *Server) forward(ctx context.Context, acc *Account, body map[string]any,
 	}
 	for k, v := range headers {
 		req.Header.Set(k, v)
+	}
+	// 发送节奏：所有模型转发请求共享一个随机间隔闸门。放在真正发出之前，
+	// 对直连和兜底出口都生效——被拦的是「这个出口 IP 的发送形态」，换出口
+	// 并不同时换掉这个形态。见 pacing.go。
+	if err := s.upstream.pacer.wait(ctx); err != nil {
+		return nil, nil, err
 	}
 	doer := s.upstream.Do
 	if viaEgress && s.upstream.egressClient != nil {

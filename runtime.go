@@ -47,6 +47,16 @@ func envInt(key string, fallback int) int {
 	return fallback
 }
 
+// envIntAllowZero 与 envInt 相同，但允许 0（有些阈值用 0 表示「关闭」）。
+func envIntAllowZero(key string, fallback int) int {
+	if raw := strings.TrimSpace(os.Getenv(key)); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n >= 0 {
+			return n
+		}
+	}
+	return fallback
+}
+
 func envOr(key, fallback string) string {
 	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
 		return v
