@@ -348,6 +348,55 @@ TLS）→ CONNECT → 对目标再做一次 TLS → 发 `GET /api/v1/client/conf
     WAF 405 毫无帮助**——同条件下 3.17.2 和 3.19.1 的「每次成功摊到的 405」都是
     9.2~10.0，差异在噪声内（见「并发上限」一节）。升它纯粹是为了跟官方保持同步。
 
+    **2026-11-22 官方客户端取证：3.19.1 的提示词文本与 3.17.2 完全相同。**
+    所以「有没有更新的提示词」这个问题现在有定论了——没有。取证方法可复用：
+
+    ```bash
+    # 1. 版本号从 https://zcode.z.ai/releases 解析，下载对应平台的官方客户端
+    curl -sSL -o zcode.AppImage \
+      https://cdn-zcode.z.ai/zcode/electron/releases/3.19.1/linux-x64/ZCode-3.19.1-linux-x64.AppImage
+    # 2. AppImage 自带解包，不需要 FUSE 或 unsquashfs
+    chmod +x zcode.AppImage && ./zcode.AppImage --appimage-extract
+    # 3. 提示词在 resources/glm/zcode.cjs（15.8MB，md5 05733647823ffcf6d755fc6f4fee1a9f）
+    ```
+
+    比对结果（`ZCode-3.19.1-linux-x64` 的 bundle，md5 `05733647823ffcf6…`）：
+
+    | 段落 | 官方 3.19.1 | 我们 317 | 结果 |
+    |---|---|---|---|
+    | CLI Prefix | `You are ZCode, an interactive agent` | 同 | 逐字相同 |
+    | Harness | 673 字符（`e=true` 分支） | 同 | 逐字相同 |
+    | Dynamic Behavior | 975 字符（qoc+Woc+Voc） | 同 | 逐字相同 |
+    | Desktop Context | 存在 | 有这一段 | 一致 |
+
+    官方 harness 按参数分两支，我们用的正是默认的 `e=true`：
+
+    ```js
+    ` - ${e ? "The system may send updates... via mid-conversation system turns..."
+            : "`<system-reminder>` tags ... injected by the harness..."}`
+    ```
+
+    **唯一差异是行尾**：官方 harness 用 ``.join(`\r\n`)``，我们用 `\n`（同内容差 5 字节）。
+    上游不校验这个（我们一直是 200），不做改动。
+
+    结论：**不存在「3.19.x 新提示词」**。3.16.x → 3.17.2 → 3.19.1 这段区间官方没改文本，
+    所以 `3.19.1 版本号 + 317 文本` 是内容自洽的，不是「旧文本配新版本号」。
+
+    旁证（2026-11-22 查 GitHub 活跃同类项目）：
+
+    | 项目 | 星 | 更新 | messages 版本策略 | 提示词 |
+    |---|---|---|---|---|
+    | dengyie/zcode2api | 165 | 11-21 | `PROMPT_ALIGNED_VERSION="3.17.2"`；messages 保 3.17.2、billing 抬 3.18.2 | 与我们逐字段相同 |
+    | 7sen1ot/zcode2api | 158 | 11-22 | 只出现 3.17.2 | 同一份（数组格式） |
+    | TriDefender/zcode-api | 577 | 11-20 | 最高 3.17.1 | 缺 Desktop Context 段 |
+    | B3hnamR/AutoZcoder | 53 | 11-17 | 3.18.2 | 3.16.x 抓包 |
+
+    引用 AutoZcoder 时注意分寸：它的 `PROTOCOL.md` 标题是
+    `(3.16.x captures, 3.18.0 client default)`，release notes 里也写明回归测试
+    「**do not establish the server's matching rules**」「不能证明上游接受未改动的旧客户端」。
+    所以它不是「3.19.x 已适配」的证据，只是同源文本的旁证。
+
+
     另一个坑：zcode2api-plus 对 `mode=jwt` 的账号**强制先解验证码**（`needsCaptcha :=
     acc.Mode == "jwt"`），没有浏览器求解器就直接 503 `captcha_required`、根本不发上游。
     所以拿它做形态验证必须先跳掉这一步，否则看到的 503 是它自己的门槛，不是上游拒绝。
