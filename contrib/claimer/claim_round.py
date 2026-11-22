@@ -91,9 +91,94 @@ ENABLE_AFTER_CLAIM = os.environ.get("ZC_ENABLE_AFTER_CLAIM", "1") == "1"
 DISABLED_MARKER = os.environ.get("ZC_DISABLED_MARKER", "迁移时停用")
 DRY = "--dry-run" in sys.argv
 
+# --scan: 只探测活动横幅（不解码/不领取/不动启停）。发现新批次时 TG 告警并以
+#   退出码 2 结束，由 scan_round.sh 立即触发一次完整抢领轮。
+# --now: 完整领取轮但跳过领取时段限制——新批次开闸不等人，19-21 点外也领。
+# --seed: 把当前见到的 planId 记进 seen_plans.json 且不发告警（部署时打底）。
+#
+# 三类套餐要区分清楚：
+#   Start Plan(8M，新号每日额度连续 5 日) —— 就是要解决的那个；
+#   GLOBAL BUILD(300M，工作日晚) / WEEKEND BUILD(500M，周末) —— 一直能领。
+# Start Plan 批次的领取窗口只有几个小时，3012 不能按默认 6 小时缓存退避
+# （1118/1119 两期就是被 6 小时缓存挡死在窗口里的）：改 20 分钟；1004
+# （上游原话 "not eligible ... yet"，资格会随账号成熟满足）改 1 小时。
+SCAN = "--scan" in sys.argv
+NOW = "--now" in sys.argv
+SEED = "--seed" in sys.argv
+SEEN_FILE = "seen_plans.json"  # 完整路径在 STATE_DIR 定义后补（见下）
+TG_TOKEN = os.environ.get("ZC_TG_TOKEN", "")
+TG_CHAT = os.environ.get("ZC_TG_CHAT", "")
+
+
+def tg_send(text):
+    """新批次告警。失败只写日志，绝不影响领取主流程。"""
+    if not TG_TOKEN or not TG_CHAT:
+        return
+    try:
+        data = json.dumps({"chat_id": TG_CHAT, "text": text}).encode()
+        req = urllib.request.Request(
+            "https://api.telegram.org/bot%s/sendMessage" % TG_TOKEN,
+            data=data, headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=15)
+    except Exception as e:
+        say("    WARN: TG 通知失败 " + str(e)[:80])
+
+
+def plan_class(plan_id, name=""):
+    """按名称 + planId 里的 gb/wk 段分类（planId 全带 start-plan 前缀，不能只看前缀）。"""
+    text = (name or "") + " " + (plan_id or "")
+    if "GLOBAL BUILD" in text or "-gb-" in text:
+        return "GLOBAL_BUILD"
+    if "WEEKEND BUILD" in text or "-wk-" in text or text.rstrip().endswith("-wk"):
+        return "WEEKEND_BUILD"
+    if "start-plan" in text or "Start Plan" in text:
+        return "START_PLAN"
+    return "OTHER"
+
+
+CLASS_LABEL = {
+    "START_PLAN": "Start Plan(8M新号5日)",
+    "GLOBAL_BUILD": "GLOBAL BUILD(300M工作日晚)",
+    "WEEKEND_BUILD": "WEEKEND BUILD(500M周末)",
+    "OTHER": "未知批次",
+}
+
+
+def retry_until(cls, code, upstream_next, now):
+    """失败缓存到期时间。1005 的名额恢复时间永远听上游的；其余按类别退避。
+    默认给短退避（3012→20 分钟、1004→1 小时）：没领过的批次类型赌不起窗口，
+    1118/1119 就是长退避错过整期的。只有明确认定的 BUILD 系（每日/每周末
+    重复开、窗口长）才用默认 6 小时长退避，避免对它高频重试浪费验证码。
+    """
+    if upstream_next:
+        return int(upstream_next)
+    if cls in ("GLOBAL_BUILD", "WEEKEND_BUILD"):
+        return int(now + RETRY_SKIP_HOURS * 3600)
+    short = {3012: 20 * 60, 1004: 60 * 60}
+    return int(now + short.get(code, RETRY_SKIP_HOURS * 3600))
+
+
+def load_seen():
+    try:
+        return json.load(open(SEEN_FILE))
+    except Exception:
+        return {}
+
+
+def save_seen(seen):
+    try:
+        os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+        tmp = SEEN_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(seen, f)
+        os.replace(tmp, SEEN_FILE)
+    except Exception as e:
+        say("    WARN: seen_plans 写入失败 " + str(e)[:60])
+
 LOG = os.environ.get("ZC_LOG", "/var/log/zcode-claimer.log")
 STATE_DIR = os.environ.get("ZC_STATE_DIR", "/var/lib/zcode-claimer")
 STATE_FILE = os.path.join(STATE_DIR, "attempts.json")
+SEEN_FILE = os.path.join(STATE_DIR, SEEN_FILE)
 SKIP_CODES = {1001, 1002, 1003, 1004, 1005, 3012}
 
 
@@ -418,19 +503,26 @@ def main():
     on = sum(1 for a in accounts if a.get("enabled"))
     say(f"================ 领取轮开始（{len(accounts)} 个账号：启用 {on} / 禁用 {len(accounts)-on}，dry_run={DRY}）================")
 
-    woke, slept = manage_pass(accounts)
+    if SCAN:
+        # 扫描轮只看横幅：不解码、不领取、不动额度启停
+        woke, slept = 0, 0
+    else:
+        woke, slept = manage_pass(accounts)
     if woke or slept:
         say(f"  本轮额度启停：启用 {woke} 个、禁用 {slept} 个")
 
     # 领取只在活动开放时段做。额度启停（上面那步）照常每小时跑——否则
     # 23:00 额度到账、号要等到第二天 19:00 才被启用，白等 20 小时。
-    if not DRY and not in_claim_window():
+    if not DRY and not NOW and not in_claim_window():
         say(f"  当前不在领取时段（ZC_CLAIM_WINDOW={CLAIM_WINDOW or '不限'}，"
             f"按 {CLAIM_TZ}），本轮只做额度启停；需要立刻领取请用面板「领取」按钮")
         return 0
 
     attempts = load_attempts()
     now = time.time()
+
+    seen = load_seen()
+    fresh = {}
     todo, skipped = [], 0
     for a in accounts:
         aid, label = a.get("id"), a.get("label") or a.get("id")
@@ -446,7 +538,13 @@ def main():
         cap = snap.get("captcha") or {}
         for p in snap.get("plans") or []:
             plan_id = p.get("planId")
-            if not plan_id or p.get("claimed"):
+            if not plan_id:
+                continue
+            if plan_id not in seen:
+                seen[plan_id] = {"cls": plan_class(plan_id, p.get("name") or ""),
+                                 "name": p.get("name") or "", "first": int(time.time())}
+                fresh[plan_id] = fresh.get(plan_id, 0) + 1
+            if p.get("claimed"):
                 continue
             if REQUIRE_CLAIMABLE and not p.get("claimable"):
                 continue
@@ -460,6 +558,21 @@ def main():
             todo.append((aid, label, plan_id, p.get("name"),
                          cap.get("sceneId"), cap.get("region"), cap.get("prefix")))
 
+
+    if fresh:
+        save_seen(seen)
+        lines = [f"🆕 {pid} [{CLASS_LABEL.get(seen[pid]['cls'], '?')}]"
+                 f" {(seen[pid].get('name') or '')[:30]}" for pid in fresh]
+        say("  新批次: " + " | ".join(lines))
+        if not SEED:
+            tg_send("zcode 新活动批次:\n" + "\n".join(lines) +
+                    "\n将立即触发全池抢领（Start Plan 批次窗口短）")
+    if SCAN:
+        if fresh and not SEED:
+            say("  scan: 发现新批次 → 退出码 2，触发抢领轮")
+            return 2
+        say("  scan: 无新批次")
+        return 0
     if not todo:
         say(f"  本轮没有可领套餐（按失败缓存跳过 {skipped} 项）")
         return 0
@@ -566,7 +679,8 @@ def main():
             failed += 1
             attempts[f"{aid}|{plan_id}"] = {
                 "code": code, "ts": now, "msg": str(res.get("message"))[:80],
-                "until": int(res.get("nextAt") or 0),
+                "until": retry_until(plan_class(plan_id, name), code,
+                                     res.get("nextAt"), now),
             }
             say(f"    ❌ 领取失败 HTTP {st} code={code} msg={res.get('message')!r}")
             streak_3012 = streak_3012 + 1 if code == 3012 else 0
