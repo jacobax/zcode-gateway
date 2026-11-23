@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -165,6 +167,24 @@ func (s *Server) refreshQuota(ctx context.Context, acc *Account) error {
 	if balanceResp != nil {
 		balances = balanceResp.Data.Balances
 		balancePlans = balanceResp.Data.Plans
+	}
+
+	// 首次激活按出口 IP 限流（每个 IP 约 5 个号）：直连读不到任何套餐时，
+	// 换一个中继出口再试一次。已激活的号直连就能读到，不会走到这里。
+	if balanceErr == nil && len(balancePlans) == 0 && len(balances) == 0 &&
+		quotaRotateFallback() && s.upstream.HasClaimProxy() {
+		if ip := rotateQuotaExit(ctx, s.upstream); ip != "" {
+			retry, retryErr := s.tryBalanceWith(ctx, s.upstream.Claim(), acc, currentPlan)
+			if retryErr == nil && retry != nil {
+				balanceResp = retry
+				balances = retry.Data.Balances
+				balancePlans = retry.Data.Plans
+				log.Printf("quota: %s 直连无套餐，换出口 %s 后 plans=%d balances=%d",
+					acc.Label, ip, len(balancePlans), len(balances))
+			} else if retryErr != nil {
+				log.Printf("quota: %s 换出口 %s 重试失败: %v", acc.Label, ip, retryErr)
+			}
+		}
 	}
 
 	// billing/current 现在对所有账号返回 plans: []（2026-10 上游行为变化）。
@@ -578,6 +598,11 @@ func pendingWhen(items []QuotaPending) string {
 }
 
 func (s *Server) tryBalance(ctx context.Context, acc *Account, plan *PlanInfo) (*PlanResponse, error) {
+	return s.tryBalanceWith(ctx, s.quotaHTTP(), acc, plan)
+}
+
+// tryBalanceWith 用指定出口读一次 balance；换出口重试时传中继的 doer。
+func (s *Server) tryBalanceWith(ctx context.Context, doer HTTPDoer, acc *Account, plan *PlanInfo) (*PlanResponse, error) {
 	base := upstreamBase() + "/api/v1/zcode-plan/billing/balance"
 	headers := s.profileHeaders(acc)
 	headers["Authorization"] = "Bearer " + acc.ZcodeJWT
@@ -592,7 +617,7 @@ func (s *Server) tryBalance(ctx context.Context, acc *Account, plan *PlanInfo) (
 	if plan != nil && plan.UserPlanID != "" {
 		query += "&user_plan_id=" + plan.UserPlanID
 	}
-	resp, err := doRequest(ctx, s.quotaHTTP(), http.MethodGet, base+query, headers, nil)
+	resp, err := doRequest(ctx, doer, http.MethodGet, base+query, headers, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -608,4 +633,36 @@ func (s *Server) tryBalance(ctx context.Context, acc *Account, plan *PlanInfo) (
 		return nil, fmt.Errorf("balance code=%d HTTP %d", parsed.Code, resp.StatusCode)
 	}
 	return &parsed, nil
+}
+
+// quotaRotateFallback 控制「首次激活被出口 IP 限流时换中继出口重试」，默认开。
+// 关掉只需 ZCODE_QUOTA_ROTATE_FALLBACK=0。
+func quotaRotateFallback() bool {
+	switch strings.ToLower(strings.TrimSpace(envOr("ZCODE_QUOTA_ROTATE_FALLBACK", "1"))) {
+	case "0", "false", "off", "no":
+		return false
+	}
+	return true
+}
+
+var (
+	quotaRotateAt   atomic.Int64
+	quotaRotateWait = 30 * time.Second
+)
+
+// rotateQuotaExit 按 30 秒节流换一次中继出口；返回新出口，空 = 没换。
+// 节流是必须的：一轮 refreshAllQuotas 会连续给多个未激活号重试，
+// 不压住的话每个号都会断一次隧道。
+func rotateQuotaExit(ctx context.Context, u *Upstream) string {
+	now := time.Now().Unix()
+	for {
+		last := quotaRotateAt.Load()
+		if now-last < int64(quotaRotateWait.Seconds()) {
+			return ""
+		}
+		if quotaRotateAt.CompareAndSwap(last, now) {
+			break
+		}
+	}
+	return u.RotateClaimProxy(ctx)
 }

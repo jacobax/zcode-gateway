@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	fhttp "github.com/bogdanfinn/fhttp"
+	"io"
 	"log"
+	"net/http"
 	"net/url"
 	"os"
 	"strings"
@@ -197,6 +199,28 @@ func (d claimDoer) Do(req *fhttp.Request) (*fhttp.Response, error) {
 // Claim 返回领取/活动调用应使用的 HTTPDoer。
 func (u *Upstream) Claim() HTTPDoer {
 	return claimDoer{c: u.claimClient}
+}
+
+// RotateClaimProxy 让本地中继换一个出口 IP：GET <claimProxy>/rotate。
+//
+// 用途只有一个：额度刷新时上游按「出口 IP」限流首次发放（2026-11 实测每个 IP
+// 约 5 个号），直连拿不到套餐时换中继出口再试一次。失败返回空串，调用方照旧。
+func (u *Upstream) RotateClaimProxy(ctx context.Context) string {
+	if u.claimProxyURL == "" {
+		return ""
+	}
+	target := strings.TrimRight(u.claimProxyURL, "/") + "/rotate"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return ""
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+	return strings.TrimSpace(string(body))
 }
 
 func (u *Upstream) Do(req *fhttp.Request) (*fhttp.Response, error) {
