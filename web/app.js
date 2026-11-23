@@ -14,6 +14,7 @@ const state = {
   activityCaptcha: null,
   proxies: null,
   accountSort: { key: 'priority', dir: 'asc' },
+  selected: new Set(),
 };
 
 const numberFmt = new Intl.NumberFormat('zh-CN');
@@ -316,6 +317,90 @@ function renderAccounts() {
   $('accounts-empty').classList.toggle('hidden', state.accounts.length > 0);
   $('accounts-table').classList.toggle('hidden', state.accounts.length === 0);
   updateSortMarks();
+  syncSelectionUI();
+}
+
+function syncSelectionUI() {
+  const ids = new Set(state.accounts.map((a) => a.id));
+  for (const id of [...state.selected]) if (!ids.has(id)) state.selected.delete(id);
+  const bar = $('accounts-bulk-bar');
+  const count = $('accounts-bulk-count');
+  const all = $('accounts-select-all');
+  if (bar) bar.hidden = state.selected.size === 0;
+  if (count) count.textContent = `已选 ${state.selected.size} 个`;
+  if (all) {
+    all.checked = state.accounts.length > 0 && state.selected.size === state.accounts.length;
+    all.indeterminate = state.selected.size > 0 && state.selected.size < state.accounts.length;
+  }
+  document.querySelectorAll('.account-select').forEach((el) => {
+    el.checked = state.selected.has(el.dataset.id);
+  });
+}
+
+function selectedIds() { return [...state.selected]; }
+
+async function bulkToggle(enabled) {
+  const ids = selectedIds();
+  if (!ids.length) return;
+  let ok = 0;
+  for (const id of ids) {
+    try {
+      await api(`/api/accounts/${encodeURIComponent(id)}`, {
+        method: 'PATCH', body: JSON.stringify({ enabled }),
+      });
+      ok += 1;
+    } catch (error) { toast(`${shortId(id)}: ${error.message}`, true); }
+  }
+  await loadAccounts();
+  await loadOverview();
+  toast(`已${enabled ? '启用' : '禁用'} ${ok}/${ids.length} 个账号`);
+}
+
+async function bulkRefresh() {
+  const ids = selectedIds();
+  if (!ids.length) return;
+  let ok = 0;
+  for (const id of ids) {
+    try {
+      await api(`/api/accounts/${encodeURIComponent(id)}/refresh`, { method: 'POST' });
+      ok += 1;
+    } catch (error) { toast(`${shortId(id)}: ${error.message}`, true); }
+  }
+  await loadAccounts();
+  await loadOverview();
+  toast(`已刷新 ${ok}/${ids.length} 个账号额度`);
+}
+
+async function bulkClearCooldown() {
+  const ids = selectedIds();
+  if (!ids.length) return;
+  let ok = 0;
+  for (const id of ids) {
+    try {
+      await api(`/api/accounts/${encodeURIComponent(id)}/clear-cooldown`, { method: 'POST' });
+      ok += 1;
+    } catch (error) { toast(`${shortId(id)}: ${error.message}`, true); }
+  }
+  await loadAccounts();
+  await loadOverview();
+  toast(`已清除 ${ok}/${ids.length} 个账号的冷却`);
+}
+
+async function bulkDelete() {
+  const ids = selectedIds();
+  if (!ids.length) return;
+  if (!window.confirm(`确定删除选中的 ${ids.length} 个账号？相关日志会保留。`)) return;
+  let ok = 0;
+  for (const id of ids) {
+    try {
+      await api(`/api/accounts/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      ok += 1;
+      state.selected.delete(id);
+    } catch (error) { toast(`${shortId(id)}: ${error.message}`, true); }
+  }
+  await loadAccounts();
+  await loadOverview();
+  toast(`已删除 ${ok}/${ids.length} 个账号`);
 }
 
 function accountRow(account, index) {
@@ -366,6 +451,7 @@ function accountRow(account, index) {
     ['思考', today.reasoning],
   ].map(([label, value]) => `<div class="token-cell"><span>${label}</span><strong>${units(value)}</strong></div>`).join('');
   return `<tr data-account="${esc(account.id)}">
+    <td class="w-select"><input type="checkbox" class="account-select" data-id="${esc(account.id)}"${state.selected.has(account.id) ? ' checked' : ''}></td>
     <td><span class="tag info">#${account.priority}</span></td>
     <td>
       <div style="font-weight:600">${esc(account.label)}</div>
@@ -471,9 +557,45 @@ function claimEstimate(count) {
   return Math.max(1, Math.ceil((Number(count) * CLAIM_SEC_PER_ACCOUNT) / 60));
 }
 
+function expandCronField(field, lo, hi) {
+  const out = new Set();
+  for (const rawPart of String(field || '').split(',')) {
+    let body = rawPart.trim();
+    if (!body) continue;
+    let step = 1;
+    if (body.includes('/')) {
+      const [b, s] = body.split('/');
+      body = b.trim();
+      step = parseInt(s, 10);
+      if (!Number.isFinite(step) || step <= 0) continue;
+    }
+    if (body === '*') {
+      for (let v = lo; v <= hi; v += step) out.add(v);
+      continue;
+    }
+    if (body.includes('-')) {
+      const [a, b] = body.split('-').map((x) => parseInt(x, 10));
+      if (Number.isNaN(a) || Number.isNaN(b)) continue;
+      for (let v = a; v <= b; v += step) if (v >= lo && v <= hi) out.add(v);
+      continue;
+    }
+    const v = parseInt(body, 10);
+    if (!Number.isNaN(v) && v >= lo && v <= hi) out.add(v);
+  }
+  return [...out].sort((x, y) => x - y);
+}
+
+function isCronSpec(raw) {
+  return String(raw || '').trim().split(/\s+/).length === 5;
+}
+
 function parseClaimWindow(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return [];
+  if (text === '*') return Array.from({ length: 24 }, (_, i) => i);
+  if (isCronSpec(text)) return expandCronField(text.split(/\s+/)[1], 0, 23);
   const hours = new Set();
-  for (const part of String(raw || '').replace(/\s/g, '').split(',')) {
+  for (const part of text.replace(/\s/g, '').split(',')) {
     if (!part) continue;
     if (part.includes('-')) {
       const [lo, hi] = part.split('-').map((x) => parseInt(x, 10));
@@ -490,16 +612,24 @@ function parseClaimWindow(raw) {
 function updateClaimWindowHint() {
   const el = $('claim-window-hint');
   if (!el) return;
+  const raw = $('setting-claim-window').value.trim();
   const count = (state.accounts || []).length;
   const minutes = claimEstimate(count);
-  const hours = parseClaimWindow($('setting-claim-window').value);
   const head = `当前 ${count} 个账号，一轮约 ${minutes} 分钟（每个号约 ${CLAIM_SEC_PER_ACCOUNT} 秒）。`;
-  if (!hours.length) {
-    el.textContent = `${head} 留空 = 每小时都尝试领取，解验证码的开销会一直花下去。`;
+  if (!raw) {
+    el.textContent = `${head} 留空 = 不自动领取，只有点「领取」才跑。`;
     return;
   }
+  const hours = parseClaimWindow(raw);
+  if (!hours.length) {
+    el.textContent = `${head} ⚠ 没解析出时段，检查写法（cron 形如 0 19-21 * * 1-5）。`;
+    return;
+  }
+  const cron = isCronSpec(raw);
+  const dow = cron ? raw.split(/\s+/)[4] : '';
+  const scope = cron && dow && dow !== '*' ? `（周 ${dow}）` : '';
   if (hours.length === 1) {
-    el.textContent = `${head} ⚠ 只有一个时段 ${hours[0]}:xx —— 来不及重试的号要等第二天，建议至少排两个。`;
+    el.textContent = `${head} ⚠ 只命中一个时段 ${hours[0]}:xx${scope} —— 来不及重试的号要等下一轮，建议排两个以上。`;
     return;
   }
   let minGap = Infinity;
@@ -507,10 +637,10 @@ function updateClaimWindowHint() {
     minGap = Math.min(minGap, (hours[i] - hours[i - 1]) * 60);
   }
   if (minutes > minGap) {
-    el.textContent = `${head} ⚠ 相邻两轮只隔 ${minGap} 分钟，比预计耗时还短 —— `
-      + `后一轮会等前一轮跑完（systemd 不会并发），实际只剩一轮的量。建议加一个时段或错开。`;
+    el.textContent = `${head} ⚠ 相邻两轮只隔 ${minGap} 分钟${scope}，比预计耗时还短 —— `
+      + `后一轮会等前一轮跑完（systemd 不会并发），实际只剩一轮的量。`;
   } else {
-    el.textContent = `${head} 相邻两轮间隔 ${minGap} 分钟，够跑完还能重试。`;
+    el.textContent = `${head} 相邻两轮间隔 ${minGap} 分钟${scope}，够跑完还能重试。`;
   }
 }
 
@@ -1588,6 +1718,27 @@ if ($('accounts-table')) {
 if ($('proxy-add')) $('proxy-add').addEventListener('click', addProxies);
 if ($('proxy-reload')) $('proxy-reload').addEventListener('click', loadProxies);
 if ($('proxy-save-settings')) $('proxy-save-settings').addEventListener('click', saveProxySettings);
+
+// 账号批量选择与批量操作
+if ($('accounts-bulk-bar')) {
+  $('accounts-select-all').addEventListener('change', (event) => {
+    state.selected = event.target.checked ? new Set(state.accounts.map((a) => a.id)) : new Set();
+    syncSelectionUI();
+  });
+  $('accounts-table').addEventListener('change', (event) => {
+    const cb = event.target.closest('.account-select');
+    if (!cb) return;
+    if (cb.checked) state.selected.add(cb.dataset.id);
+    else state.selected.delete(cb.dataset.id);
+    syncSelectionUI();
+  });
+  $('bulk-enable').addEventListener('click', () => bulkToggle(true));
+  $('bulk-disable').addEventListener('click', () => bulkToggle(false));
+  $('bulk-refresh').addEventListener('click', bulkRefresh);
+  $('bulk-clear-cooldown').addEventListener('click', bulkClearCooldown);
+  $('bulk-delete').addEventListener('click', bulkDelete);
+  $('bulk-clear').addEventListener('click', () => { state.selected.clear(); syncSelectionUI(); });
+}
 
 // Initial load + 30s polling.
 loadOverview();

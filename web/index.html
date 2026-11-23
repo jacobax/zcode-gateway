@@ -194,9 +194,19 @@
         </div>
       </details>
       <div class="card">
+        <div class="bulk-bar" id="accounts-bulk-bar" hidden>
+          <span class="bulk-count" id="accounts-bulk-count">已选 0 个</span>
+          <button class="btn" id="bulk-enable" type="button">启用</button>
+          <button class="btn" id="bulk-disable" type="button">禁用</button>
+          <button class="btn" id="bulk-refresh" type="button">刷新额度</button>
+          <button class="btn" id="bulk-clear-cooldown" type="button">清冷却</button>
+          <button class="btn danger" id="bulk-delete" type="button">删除</button>
+          <button class="btn ghost" id="bulk-clear" type="button">取消选择</button>
+        </div>
         <div class="table-wrap accounts-scroll">
           <table class="table accounts-table" id="accounts-table">
         <thead><tr>
+          <th class="w-select"><input type="checkbox" id="accounts-select-all" title="全选"></th>
           <th class="w-priority sortable" data-sort="priority">优先级</th>
           <th class="sortable" data-sort="label">账号</th>
           <th class="sortable" data-sort="mode">模式</th>
@@ -378,9 +388,9 @@
             <small>每个账号同时在途的请求数。账号自己在「账号管理」里设了并发，就以账号的为准。</small>
           </label>
           <label class="field">
-            <span>自动领取时段（北京时间）</span>
-            <input class="input" id="setting-claim-window" placeholder="19-21" autocomplete="off">
-            <small id="claim-window-hint">留空 = 每小时都尝试领取。</small>
+            <span>自动领取时段（cron，北京时间）</span>
+            <input class="input" id="setting-claim-window" placeholder="0 19-21 * * 1-5" autocomplete="off" spellcheck="false">
+            <small id="claim-window-hint">5 段 cron：分 时 日 月 周。例如 <code>0 19-21 * * 1-5</code> = 周一到周五的 19/20/21 点整。留空 = 不自动领取（只有手动点「领取」才跑）；<code>*</code> = 不限时段；也兼容旧的 <code>19-21</code> 写法。</small>
           </label>
           <div class="info-row"><span>API Base</span><code id="setting-base">-</code></div>
           <div class="info-row"><span>网关版本</span><code id="setting-version">-</code></div>

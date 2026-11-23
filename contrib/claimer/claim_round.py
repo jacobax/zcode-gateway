@@ -449,20 +449,88 @@ def solver_proxy():
     return RELAY_PROXY_URL
 
 
+def cron_field_match(field, value):
+    """单段 cron 匹配：* / 数字 / a-b / 列表 / 带步长（*/n、a-b/n）。"""
+    for part in str(field).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if part == "*":
+            return True
+        step = 1
+        if "/" in part:
+            body, _, step_s = part.partition("/")
+            try:
+                step = int(step_s)
+            except ValueError:
+                continue
+            if step <= 0:
+                continue
+        else:
+            body = part
+        if body == "*":
+            if value % step == 0:
+                return True
+            continue
+        if "-" in body:
+            lo_s, _, hi_s = body.partition("-")
+            try:
+                lo, hi = int(lo_s), int(hi_s)
+            except ValueError:
+                continue
+        else:
+            try:
+                lo = hi = int(body)
+            except ValueError:
+                continue
+        if lo <= value <= hi and (value - lo) % step == 0:
+            return True
+    return False
+
+
+def cron_matches(spec, now):
+    """5 段 cron（分 时 日 月 周）匹配；周字段 0=周日、1=周一 … 6=周六。"""
+    fields = str(spec).split()
+    if len(fields) != 5:
+        return None
+    minute, hour, dom, month, dow = fields
+    if not cron_field_match(minute, now.minute):
+        return False
+    if not cron_field_match(hour, now.hour):
+        return False
+    if not cron_field_match(dom, now.day):
+        return False
+    if not cron_field_match(month, now.month):
+        return False
+    if not cron_field_match(dow, now.isoweekday() % 7):
+        return False
+    return True
+
+
 def in_claim_window():
     """现在是不是活动开放时段。True 才真去解验证码领取。
 
-    CLAIM_WINDOW 支持 "19,20"（两个整点）或 "19-21"（区间）或 "" / "*"（不限）。
-    按 CLAIM_TZ 判定，默认北京时间。
+    CLAIM_WINDOW 支持三种写法，按 CLAIM_TZ（默认北京时间）判定：
+      1. 5 段 cron（推荐）——  "0 19-21 * * 1-5" = 周一到周五的 19/20/21 点整
+      2. 旧的小时列表    ——  "19,20" 或 "19-21"
+      3. "*"             ——  不限时段
+    留空 = 不领取（定时轮次只做额度启停，不碰验证码）。
     """
     spec = (CLAIM_WINDOW or "").strip()
-    if not spec or spec == "*":
+    if spec == "*":
         return True
+    if not spec:
+        return False
     try:
         from zoneinfo import ZoneInfo
         local = datetime.datetime.now(ZoneInfo(CLAIM_TZ))
     except Exception:
         local = datetime.datetime.now()
+    if len(spec.split()) == 5:
+        try:
+            return bool(cron_matches(spec, local))
+        except Exception:
+            return False
     hours = set()
     for part in spec.replace(" ", "").split(","):
         if not part:

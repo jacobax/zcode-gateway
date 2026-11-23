@@ -464,13 +464,43 @@ func mapKeys(m map[string]bool) []string {
 //	"19,20"  → "19,20"
 //	"19-21"  → "19,20,21"
 //	"23-2"   → "0,1,2,23"（跨零点）
-//	""/"*"   → ""（不限时段）
+//	""        → ""（留空 = 不领取，定时轮次只做额度启停）
+//	"*"       → "*"（不限时段）
+//	5 段 cron → 原样保存，如 "0 19-21 * * 1-5"
 //
 // 非法输入返回 ok=false，调用方保持原值，别让手滑把 claimer 变成「每小时都跑」。
+// validCronField 只做字符集校验（数字 / * / , / - / /），具体语义由 claimer 解释。
+func validCronField(f string) bool {
+	if f == "" {
+		return false
+	}
+	for _, r := range f {
+		switch {
+		case r >= '0' && r <= '9', r == '*', r == ',', r == '-', r == '/':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func normalizeClaimWindow(raw string) (string, bool) {
 	spec := strings.TrimSpace(raw)
-	if spec == "" || spec == "*" {
+	if spec == "" {
 		return "", true
+	}
+	if spec == "*" {
+		return "*", true
+	}
+	// 5 段 cron（分 时 日 月 周）原样保存，语义交给 claimer 的 in_claim_window 解释。
+	// 分钟精度只有 cron 能表达，旧的「小时列表」做不到。
+	if fields := strings.Fields(spec); len(fields) == 5 {
+		for _, f := range fields {
+			if !validCronField(f) {
+				return "", false
+			}
+		}
+		return strings.Join(fields, " "), true
 	}
 	hours := map[int]bool{}
 	for _, part := range strings.Split(strings.ReplaceAll(spec, " ", ""), ",") {

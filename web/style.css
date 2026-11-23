@@ -515,3 +515,14 @@ th[data-sort][data-dir="desc"]::after { content: '▼'; opacity: .9; }
 .claim-result-fails .name { color: var(--text); flex: 0 0 auto; }
 .claim-result-fails .why { color: var(--text-2); font-size: 12px; word-break: break-all; }
 .claim-result-meta { margin-top: 6px; color: var(--text-3); font-size: 12px; }
+/* 账号批量选择 */
+.w-select { width: 36px; text-align: center; }
+.w-select input { cursor: pointer; width: 14px; height: 14px; vertical-align: middle; }
+.bulk-bar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 10px 14px; border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.bulk-bar[hidden] { display: none; }
+.bulk-count { font-weight: 600; color: var(--text); margin-right: 4px; }
+.bulk-bar .btn { padding: 4px 10px; font-size: 12px; }
