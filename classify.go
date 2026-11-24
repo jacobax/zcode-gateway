@@ -97,8 +97,9 @@ var captchaChallengeHeaders = []string{
 
 // upstreamEnvelope 是上游响应里的业务码与文案。
 type upstreamEnvelope struct {
-	Code int
-	Msg  string
+	Code    int
+	Msg     string
+	TypeStr string // error.type 的字符串形态（如 overloaded_error），供非数字类语义判断
 }
 
 // parseUpstreamEnvelope 从三种响应形态里提取业务码：
@@ -122,10 +123,30 @@ func parseUpstreamEnvelope(body []byte) upstreamEnvelope {
 	if json.Unmarshal(body, &parsed) != nil {
 		return upstreamEnvelope{}
 	}
-	return upstreamEnvelope{
-		Code: firstInt(parsed.Code, parsed.Error.Code, parsed.Error.Type),
-		Msg:  firstNonEmpty(parsed.Msg, parsed.Error.Message),
+	typeStr := ""
+	if json.Unmarshal(parsed.Error.Type, &typeStr) == nil && !isJSONNumber(parsed.Error.Type) {
+		// 数字字符串（"1000"）留给 firstInt，符号名（overloaded_error）留给
+		// 过载族判断。
+		if firstInt(parsed.Error.Type) == 0 {
+			typeStr = strings.TrimSpace(typeStr)
+		} else {
+			typeStr = ""
+		}
 	}
+	return upstreamEnvelope{
+		Code:    firstInt(parsed.Code, parsed.Error.Code, parsed.Error.Type),
+		Msg:     firstNonEmpty(parsed.Msg, parsed.Error.Message),
+		TypeStr: typeStr,
+	}
+}
+
+// isJSONNumber 判断 raw 是不是 JSON 数字字面量（用于把数字与字符串分开）。
+func isJSONNumber(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var n float64
+	return json.Unmarshal(raw, &n) == nil
 }
 
 // headerGetter 让 classifyUpstream 同时接受 net/http.Header 和 fhttp.Header
@@ -187,8 +208,26 @@ func classifyUpstream(status int, headers headerGetter, body []byte) upstreamVer
 		}
 	}
 
+	// 529 / overloaded_error 是上游过载（Anthropic 族语义，AutoZcoder
+	// model_retry 同款，2026-11-18 对标吸收）：服务器容量问题，账号没坏——
+	// 落 5xx 会白记 5 分钟冷却。与 3009/3010 同族：模型级、等 1s 重试。
+	if status == 529 || env.TypeStr == "overloaded_error" {
+		return upstreamVerdict{
+			Retry: true, ModelScoped: true, Wait: modelBusyRetryAfter,
+			Reason: firstNonEmpty(env.Msg, "上游过载"),
+		}
+	}
+
 	switch {
 	case status == 401 || status == 403:
+		// CDN/WAF 的 HTML 拦截页（AutoZcoder breaker.py 2026-09-16 捕获的
+		// 边缘封禁：按出口 IP 生效、与账号无关）走 InfraBlock——落「停用」
+		// 会为网络层条件逐号清空整池。业务层的认证失败一定是 JSON，
+		// isUpstreamWAFBlock 的 "{" 前缀排除不会误伤。
+		if isUpstreamWAFBlock(body) {
+			return upstreamVerdict{Retry: true, InfraBlock: true,
+				Reason: "上游 WAF/CDN 拦截页（请求未到业务层）"}
+		}
 		return upstreamVerdict{Retry: true, Disable: true, Cooldown: authCooldown, Reason: firstNonEmpty(env.Msg, "认证失败")}
 
 	case status == 405:
@@ -362,6 +401,11 @@ var wafBlockMarkers = []string{
 	"<!doctype html",
 	"<title>405</title>",
 	"data-spm",
+	// CDN 边缘封禁页（AutoZcoder breaker.py，2026-09-16 捕获）：按出口 IP
+	// 的 HTML 403，与账号无关——它的三种正文标记照搬过来。
+	"does not have permission to get url",
+	"403 forbidden",
+	"error: forbidden",
 }
 
 // isUpstreamWAFBlock 判断响应是不是网关/WAF 的拦截页而不是业务响应。

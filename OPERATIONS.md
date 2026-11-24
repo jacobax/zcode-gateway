@@ -90,12 +90,13 @@ zcode-claimer.timer（每小时 :17）──► 面板管理接口 ──► 上
 | 1005 / 1113 / 1308–1321 额度耗尽族 | 不等待，直接换号；只记模型级失败 | 保持可用 |
 | 1302 / 1305 瞬时限流 | 短退避后换号 | 保持可用 |
 | 3008 / 3009 / 3010 并发准入族（user 级 / 模型级） | 等 1s 重试（原版客户端也是 1s/2s 退避）；3008 的根治靠每账号在飞上限（OPERATIONS #28） | 保持可用 |
+| 529 / `overloaded_error` 上游过载 | 等 1s 重试，模型级（与并发准入族同款；过载是服务器容量问题，落 5xx 会白记冷却。OPERATIONS #31） | 保持可用 |
 | 3007 验证码被拒 | 换码重试（下一次请求会重新求解） | 保持可用 |
 | 验证码挑战（`x-aliyun-captcha-*` 响应头，或 400/403 上的 captcha 文案） | 同上，**必须排在「403 → 停用」之前**，否则一次人机校验续期就把好号踢掉 | 保持可用 |
 | 内容策略拦截 | 视为 system 指纹误报，换号重试 | 保持可用 |
 | 5xx | 冷却 5 分钟后换号 | `cooling` |
 | 3012 风控 | 不原地重试，指数退避 15min 起翻倍封顶 24h（`riskStrikes` 累计） | `cooling` |
-| 401 / 403（非验证码）/ 3004 | 直接停用，等人工重新授权 | `disabled` |
+| 401 / 403（非验证码）/ 3004 | 直接停用，等人工重新授权；**例外：HTML 拦截页**（CDN/WAF 边缘封禁，按出口 IP、与账号无关）走 InfraBlock，账号状态不动（OPERATIONS #31） | JSON 认证失败 = `disabled`；HTML 拦截页 = 账号不动 |
 
 业务码解析兼容三种形态（`parseUpstreamEnvelope`）：`{"code":..}`、
 `{"error":{"code":..}}`、以及 api.z.ai 回退通道的 `{"error":{"type":"1000"}}`
@@ -563,6 +564,21 @@ TLS）→ CONNECT → 对目标再做一次 TLS → 发 `GET /api/v1/client/conf
     单礼包场景优化不变（拥有 A = 拥有全部 {A}），多礼包场景继续领下一个。
     副作用可控：拥有部分礼包的号会多打一次 detectActivities（仅多礼包时
     发生）。单测 `TestAccountOwnsAllClaimable` 钉住改前/改后差异。
+
+31. **两条上游「非账号伤害」瞬态族**（2026-11-18 吸收，AutoZcoder）。
+    本项目的 `InfraBlock`（WAF 405 HTML 页）家族再扩两员，处置都是
+    账号状态一概不动：
+    1) **CDN/WAF 边缘封禁页以 403 出现**（AutoZcoder breaker.py，
+       2026-09-16 捕获："Your client does not have permission to get
+       URL ..."，按**出口 IP** 生效）。原来 403 → 停用，一次 IP 级封禁
+       会逐号清空整池；现在 401/403 的 HTML 拦截页走 InfraBlock，纯
+       JSON 认证失败仍停用（`isUpstreamWAFBlock` 的 "{" 前缀排除兜底）。
+       aws1 生产 20 天日志 0 次出现，潜伏路径加固。
+    2) **529 / `overloaded_error` 上游过载**（Anthropic 族语义，AutoZcoder
+       model_retry.py）：服务器容量问题，落 5xx 会白记 5 分钟冷却；
+       现在归并发准入族（模型级、等 1s、不冷却）。
+    测试：`TestIsUpstreamWAFBlock` 新增 CDN 403 页/JSON 误伤两行；
+    classify 表新增边缘封禁/529/overloaded_error 三例。
 
 ## 出口 IP 与风控
 

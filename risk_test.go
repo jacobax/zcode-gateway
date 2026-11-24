@@ -86,6 +86,8 @@ func TestIsUpstreamWAFBlock(t *testing.T) {
 	}{
 		{"阿里云 WAF 405 页面", aliyunWAF405, true},
 		{"带空格的 doctype", "<!DOCTYPE html><html><title>405</title></html>", true},
+		{"CDN 边缘封禁 403 页（AutoZcoder 2026-09-16 捕获）", `<!DOCTYPE html><html><body><h1>403 Forbidden</h1><p>Your client does not have permission to get URL /api/v1/chat/completions from this server.</p></body></html>`, true},
+		{"JSON 里提到 403 forbidden 不是拦截页", `{"error":{"message":"proxy said 403 forbidden"}}`, false},
 		{"业务 3012 JSON", `{"code":3012,"msg":"This client is not supported. Please use the official ZCode client."}`, false},
 		{"业务账号风控 JSON", `{"code":3012,"msg":"账号或者网络环境存在异常"}`, false},
 		{"正常响应", `{"content":[{"type":"text","text":"hi"}]}`, false},

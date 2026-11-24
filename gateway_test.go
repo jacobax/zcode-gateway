@@ -226,6 +226,36 @@ func TestClassifyUpstream(t *testing.T) {
 			},
 		},
 		{
+			name: "CDN 边缘封禁 HTML 403：InfraBlock 不停用", status: 403,
+			header: withRetryAfter(""),
+			body:   `<!DOCTYPE html><html><body><h1>403 Forbidden</h1>Your client does not have permission to get URL /api/v1/chat/completions from this server.</body></html>`,
+			check: func(t *testing.T, v upstreamVerdict) {
+				if !v.Retry || !v.InfraBlock || v.Disable || v.Cooldown != 0 || v.Risk {
+					t.Fatalf("edge block must be InfraBlock without parking the account: %#v", v)
+				}
+			},
+		},
+		{
+			name: "529 过载：模型级短退避不冷却", status: 529,
+			header: withRetryAfter(""),
+			body:   `{"error":{"type":"api_error","message":"overloaded"}}`,
+			check: func(t *testing.T, v upstreamVerdict) {
+				if !v.Retry || !v.ModelScoped || v.Cooldown != 0 || v.Wait != modelBusyRetryAfter {
+					t.Fatalf("529 should back off briefly without cooling: %#v", v)
+				}
+			},
+		},
+		{
+			name: "overloaded_error 503 也归过载族", status: 503,
+			header: withRetryAfter(""),
+			body:   `{"error":{"type":"overloaded_error","message":"Overloaded"}}`,
+			check: func(t *testing.T, v upstreamVerdict) {
+				if !v.Retry || !v.ModelScoped || v.Cooldown != 0 || v.Wait != modelBusyRetryAfter {
+					t.Fatalf("overloaded_error should not cool the account: %#v", v)
+				}
+			},
+		},
+		{
 			name: "error.type 里的业务码也要认", status: 400,
 			header: withRetryAfter(""),
 			body:   `{"error":{"type":"1113","message":"no resource pack"}}`,
