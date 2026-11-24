@@ -62,9 +62,11 @@ var (
 )
 
 // fallbackCatalog 是拉不到上游清单时用的兜底，和 v1.12.0 之前的硬编码一致。
+// 补上元数据：上游 builtinModels 正常情况下带 contextWindow/maxCompletionTokens，
+// 兜底没这两个字段会让 /v1/models 返回 null，客户端按默认值处理。
 var fallbackCatalog = []*catalogModel{
-	{ID: "GLM-5.3-Flash", Name: "GLM-5.3-Flash", Priority: 100},
-	{ID: "GLM-5.3", Name: "GLM-5.3", Priority: 99},
+	{ID: "GLM-5.3-Flash", Name: "GLM-5.3-Flash", Priority: 100, ContextWindow: 1000000, MaxOutput: 128000},
+	{ID: "GLM-5.3", Name: "GLM-5.3", Priority: 99, ContextWindow: 1000000, MaxOutput: 128000},
 }
 
 // modelCatalog 返回当前清单（按 priority 降序）。缓存空时返回内置兜底。

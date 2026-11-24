@@ -550,17 +550,78 @@ func maskToken(token string) string {
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
+	// 上游常常先给账号权益上线新模型（Start Plan 就从 GLM-5.3 换成了 GLM-5.4），
+	// 而 /client/configs 的 builtinModels 晚一步更新。所以「有哪些模型」以账号
+	// 权益为准，catalog 只负责补 context_window / max_output_tokens 这些元数据。
+	// 反过来做（以 catalog 为准）会把上游已经不给的模型列给客户端。
+	type modelEntry struct {
+		id  string
+		ctx int
+		max int
+	}
+	list := make(map[string]*modelEntry)
+	put := func(id string, ctx, max int) {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return
+		}
+		key := strings.ToLower(id)
+		if e, ok := list[key]; ok {
+			if e.ctx == 0 {
+				e.ctx = ctx
+			}
+			if e.max == 0 {
+				e.max = max
+			}
+			return
+		}
+		list[key] = &modelEntry{id: id, ctx: ctx, max: max}
+	}
+
+	for _, acc := range s.store.Summaries() {
+		for _, qm := range acc.Quota.Models {
+			put(qm.Name, 0, 0)
+		}
+	}
 	catalog := modelCatalog()
-	models := make([]map[string]any, 0, len(catalog))
-	for _, m := range catalog {
+	if len(list) == 0 {
+		// 一个账号都没刷到额度时退回 catalog，保持旧行为。
+		for _, m := range catalog {
+			put(m.ID, m.ContextWindow, m.MaxOutput)
+		}
+	} else {
+		for _, m := range catalog {
+			if e, ok := list[strings.ToLower(strings.TrimSpace(m.ID))]; ok {
+				e.ctx, e.max = m.ContextWindow, m.MaxOutput
+			}
+		}
+		// 权益里有、catalog 里没有的模型（新上线的），用 Start Plan 的现行上限。
+		for _, e := range list {
+			if e.ctx == 0 {
+				e.ctx = 1000000
+			}
+			if e.max == 0 {
+				e.max = 128000
+			}
+		}
+	}
+
+	keys := make([]string, 0, len(list))
+	for k := range list {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	models := make([]map[string]any, 0, len(keys))
+	for _, k := range keys {
+		e := list[k]
 		entry := map[string]any{
-			"id": m.ID, "object": "model", "created": s.start.Unix(), "owned_by": "zcode",
+			"id": e.id, "object": "model", "created": s.start.Unix(), "owned_by": "zcode",
 		}
-		if m.ContextWindow > 0 {
-			entry["context_window"] = m.ContextWindow
+		if e.ctx > 0 {
+			entry["context_window"] = e.ctx
 		}
-		if m.MaxOutput > 0 {
-			entry["max_output_tokens"] = m.MaxOutput
+		if e.max > 0 {
+			entry["max_output_tokens"] = e.max
 		}
 		models = append(models, entry)
 	}
