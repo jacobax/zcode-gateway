@@ -1076,6 +1076,15 @@ func (s *Server) rotateEgress(ctx context.Context) {
 // applyVerdict 把分类结论落到账号状态上：能修的修，修不了才冷却或停用。
 func (s *Server) applyVerdict(acc *Account, v upstreamVerdict, model string) {
 	switch {
+	case v.Suspended:
+		// 封停文案有两种来源：真封停（官方渠道申诉，少数）与**形态误伤**
+		// （2026-11-27 实证：4 个被判 suspended 的号在改回 3.17.2 形态后
+		// 8/8 全部 200）。所以不能永久停用，否则会误杀可恢复的号；
+		// 但也不能按 Risk 的 15 分钟节奏重试——那正是外部实践里把软拦截
+		// 推成真封停的路径。取长冷却 + 显眼事件，等人工核对。
+		s.store.MarkExhausted(acc.ID, time.Now().Add(suspendedCooldown), v.Reason)
+		s.recordAccountEvent(acc, "上游封停文案", "冷却 "+suspendedCooldown.String()+"（先核对形态；官方客户端仍被拒才是真封停）："+v.Reason)
+		return
 	case v.Disable:
 		s.store.DisableAccount(acc.ID, v.Reason)
 		s.recordAccountEvent(acc, "已停用", v.Reason)

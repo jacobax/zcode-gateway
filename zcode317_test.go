@@ -7,6 +7,57 @@ import (
 	"time"
 )
 
+// 正文锁：Desktop Context 必须跟着版本头走。
+// 3.17.2 那条 "inline Gen UI is unavailable" 配 3.19.1 的头就是上游判
+// 3012 suspended 的形态（2026-11-27 生产 6 个号封停的直接原因）。
+func TestStableSectionsFollowVersion(t *testing.T) {
+	p := zcode317Prompts
+	if p == nil {
+		t.Fatal("prompt set 未解析")
+	}
+	if len(p.DesktopContextViews3191) != 3 {
+		t.Fatalf("3.19.1 Desktop Context 应有 3 条 bullet，得到 %d", len(p.DesktopContextViews3191))
+	}
+
+	// 3.17.2：保留旧文案。
+	old := strings.Join(stableSections317(p, "3.17.2"), "\n\n")
+	if !strings.Contains(old, "inline Gen UI is unavailable") {
+		t.Fatal("3.17.2 应保留旧 Desktop Context")
+	}
+
+	// 3.19.1：换成 Gen UI 支持版，旧 bullet 不得残留。
+	cur := strings.Join(stableSections317(p, "3.19.1"), "\n\n")
+	if strings.Contains(cur, "inline Gen UI is unavailable") {
+		t.Fatal("3.19.1 仍在发 3.17.2 的 Desktop Context（正文锁失效）")
+	}
+	if !strings.Contains(cur, "This Desktop host supports Gen UI") {
+		t.Fatal("3.19.1 应发新的 Gen UI 段落")
+	}
+	// 其余段落逐字不变（只换那一条 bullet）。
+	if !strings.Contains(cur, "### Inline Code Comments") || !strings.Contains(cur, "### Files & URLs") {
+		t.Fatal("Desktop Context 的其他小节被破坏")
+	}
+
+	// 未取证过的更高版本（如官方 4.0.0）沿用 3.19.1 文案，并由 init 打警告。
+	if !strings.Contains(strings.Join(stableSections317(p, "4.0.0"), "\n\n"), "This Desktop host supports Gen UI") {
+		t.Fatal("4.0.0 至少应沿用 3.19.1 文案")
+	}
+
+	// 版本比较本身。
+	if versionAtLeast("3.17.2", 3, 19, 1) {
+		t.Fatal("3.17.2 不该 >= 3.19.1")
+	}
+	if !versionAtLeast("3.19.1", 3, 19, 1) || !versionAtLeast("3.19.10", 3, 19, 1) {
+		t.Fatal("3.19.1 / 3.19.10 应 >= 3.19.1")
+	}
+	if !versionAtLeast("4.0.0", 3, 19, 1) {
+		t.Fatal("4.0.0 应 >= 3.19.1")
+	}
+	if versionAtLeast("3.19.1-beta.1", 3, 19, 2) {
+		t.Fatal("带后缀的 3.19.1 不该 >= 3.19.2")
+	}
+}
+
 // 3.17.2 提示词是从官方客户端抄来的字节级常量，解析失败会让开关变成空操作，
 // 这里把它钉住。
 func TestZcode317PromptsParse(t *testing.T) {

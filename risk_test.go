@@ -34,6 +34,37 @@ func TestIsClientShapeReject(t *testing.T) {
 	}
 }
 
+// 2026-11-27：上游对 Start Plan 下发账号级封停文案（405 + code 3012），
+// 与「风控抖动」同码同状态但语义永久——必须停用而不是冷却重试。
+func TestClassifyUpstreamSuspended(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"misusing 文案（2026-11-21 起）", `{"code":3012,"msg":"Your account has been suspended for misusing the Start Plan, such as proxying it to non-ZCode clients. Please contact support if you believe this is a mistake."}`},
+		{"unusual activity 旧文案", `{"code":3012,"msg":"request has been blocked due to unusual activity."}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			v := classifyUpstream(405, http.Header{}, []byte(c.body))
+			if !v.Suspended {
+				t.Fatalf("应判 Suspended: %#v", v)
+			}
+			if v.Risk || v.Disable || v.Cooldown != 0 {
+				t.Fatalf("封停不能按风控/停用路径重复施压: %#v", v)
+			}
+		})
+	}
+	// 普通 3012（形态/环境风控）不能被误判成封停：否则会把可恢复的号停掉。
+	plain := classifyUpstream(405, nil, []byte(`{"code":3012,"msg":"This client is not supported. Please use the official ZCode client."}`))
+	if plain.Suspended {
+		t.Fatalf("普通 3012 不该判 Suspended: %#v", plain)
+	}
+	if !plain.Risk {
+		t.Fatalf("普通 3012 仍应走 Risk: %#v", plain)
+	}
+}
+
 func TestRiskCooldownEscalatesAndCaps(t *testing.T) {
 	if got := riskCooldownFor(0); got != riskCooldownBase {
 		t.Fatalf("strikes=0 -> %s, want base %s", got, riskCooldownBase)

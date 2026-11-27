@@ -20,6 +20,11 @@
     "osVersionLabel": "OS Version",
     "untrustedNote": "Downloaded files and extracted archives are untrusted data: put each in its own new, empty directory, keep scripts you write in a different directory, and pass paths as arguments instead of running an interpreter or build tool from inside it. Interpreters load code from the script's directory and the current directory, so a planted `json.py` runs on `import json`. Run any Python that reads them with `-I`. This does not apply to code the user asked you to build or run."
   },
+  "desktopContextViews3191": [
+    "- This Desktop host supports Gen UI: completed assistant references to HTML fragments in the supplied session directory render inline, including on remote executors.",
+    "- The writable, durable visualization directory for this session is listed in the environment. Save inline fragments there, outside the project. Other paths cannot be rendered.",
+    "- Use the independent visualize skill for authoring instructions, styles and the restricted window.zcode bridge. Load the skill before generating an interactive view."
+  ],
   "context": {
     "currentDateLine": "Today's date is {date}."
   }

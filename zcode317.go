@@ -23,7 +23,9 @@ package main
 import (
 	_ "embed"
 	"encoding/json"
+	"log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -32,13 +34,17 @@ import (
 var zcode317PromptJSON []byte
 
 type zcode317PromptSet struct {
-	CliPrefix         string   `json:"cliPrefix"`
-	StableSections    []string `json:"stableSections"`
-	DynamicBehavior   string   `json:"dynamicBehavior"`
-	SessionGuidance   string   `json:"sessionGuidance"`
-	ContextManagement string   `json:"contextManagement"`
-	PoweredBy         string   `json:"poweredBy"`
-	Environment       struct {
+	CliPrefix      string   `json:"cliPrefix"`
+	StableSections []string `json:"stableSections"`
+	// DesktopContextViews3191 是 3.19.1 的「### Interactive views」三条 bullet，
+	// 用来替换 3.17.2 的那一条（"inline Gen UI is unavailable"）。见
+	// interactiveViews3172 / desktopContext317 的说明。
+	DesktopContextViews3191 []string `json:"desktopContextViews3191"`
+	DynamicBehavior         string   `json:"dynamicBehavior"`
+	SessionGuidance         string   `json:"sessionGuidance"`
+	ContextManagement       string   `json:"contextManagement"`
+	PoweredBy               string   `json:"poweredBy"`
+	Environment             struct {
 		Heading        string `json:"heading"`
 		InvokedLine    string `json:"invokedLine"`
 		PlatformLabel  string `json:"platformLabel"`
@@ -64,11 +70,85 @@ func init() {
 	if systemShape317() && os.Getenv("ZCODE_APP_VERSION") == "" {
 		appVersion = "3.17.2"
 	}
+	// 正文锁只对「有对应正文」的版本成立（我们手上有 3.17.2 与 3.19.1）。
+	// 显式抬到更高的版本（例如官方已到 4.0.0）时提醒：正文可能又变了，
+	// 不改正文直接发就是 3012 "suspended for misusing the Start Plan"。
+	if systemShape317() && versionAtLeast(appVersion, 4, 0, 0) {
+		log.Printf("警告：ZCODE_APP_VERSION=%s 高于我们取证过的 3.19.1，正文锁未覆盖——"+
+			"若出现 3012/405 suspended，先核对官方该版本的 Desktop Context 文本", appVersion)
+	}
+	// 2026-11-27 生产实测：同一个号在 3.19.1 头下稳定 1005（额度耗尽），
+	// 改回 3.17.2 立刻 200，交替四轮 100% 复现（aws3 真实账号）。也就是说
+	// 3.19.1 头会落到另一个权益桶，账号看起来「没额度」，随后被上游判
+	// suspended——除非你重新做过全套取证，否则不要改这个版本号。
+	if systemShape317() && strings.TrimSpace(appVersion) != "3.17.2" {
+		log.Printf("警告：317 形态的取证版本是 3.17.2，当前 ZCODE_APP_VERSION=%q——"+
+			"2026-11-27 实测非 3.17.2 版本会稳定返回 1005 并可能触发 suspended", appVersion)
+	}
 }
 
 // systemShape317 是 3.17.2 形态的总开关。
 func systemShape317() bool {
 	return strings.TrimSpace(os.Getenv("ZCODE_SYSTEM_SHAPE")) == "317"
+}
+
+// interactiveViews3172 是 3.17.2 形态里 Desktop Context 的第一条 bullet。
+//
+// 为什么单独拎出来：上游按「版本头 ↔ 系统正文」字节级比对（正文锁）。3.17.2 →
+// 3.19.1 之间官方唯一改动的正文就是这一段 Gen UI 描述（其余段落逐字相同；
+// 3.18.2 新增的 Finishing work / Memory 两段上游不校验）。用 3.19.1 的头配这条
+// 旧文案，上游判 3012 / 405 "suspended for misusing the Start Plan"——2026-11-27
+// 生产 6 个号被封停即此原因（版本头被显式设成 3.19.1，正文仍是 3.17.2）。
+// 依据：dengyie/zcode2api#16 的拆包比对 + 直连消融（3.19.1 头 + 新正文 → 200）。
+const interactiveViews3172 = "- No visualization output directory is supplied; inline Gen UI is unavailable."
+
+// stableSections317 按**当前生效的版本头**选 Desktop Context 文案，保证头文一致。
+// 这是正文锁的落地点：版本由 ZCODE_APP_VERSION（或 317 的默认 3.17.2）决定，
+// 正文跟着版本走，不再依赖「env 没设」这种巧合。
+func stableSections317(p *zcode317PromptSet, version string) []string {
+	sections := p.StableSections
+	if len(p.DesktopContextViews3191) == 0 || !versionAtLeast(version, 3, 19, 1) {
+		return sections
+	}
+	out := make([]string, len(sections))
+	copy(out, sections)
+	replaced := 0
+	for i, section := range out {
+		if !strings.Contains(section, interactiveViews3172) {
+			continue
+		}
+		out[i] = strings.Replace(section, interactiveViews3172,
+			strings.Join(p.DesktopContextViews3191, "\n"), 1)
+		replaced++
+	}
+	if replaced == 0 {
+		// 资产被改坏时宁可发出旧文案也不 panic，但必须留下证据。
+		log.Printf("警告：%s 的 Desktop Context 未找到 3.17.2 占位 bullet，正文锁未生效", version)
+	}
+	return out
+}
+
+// versionAtLeast 比较 "3.19.1" 这类版本号（忽略 -suffix）。解析失败按 0 处理。
+func versionAtLeast(v string, major, minor, patch int) bool {
+	parts := strings.SplitN(strings.TrimSpace(v), ".", 3)
+	if len(parts) < 2 {
+		return false
+	}
+	want := []int{major, minor, patch}
+	for i := 0; i < len(want) && i < len(parts); i++ {
+		seg := parts[i]
+		if j := strings.IndexFunc(seg, func(r rune) bool { return r < '0' || r > '9' }); j >= 0 {
+			seg = seg[:j]
+		}
+		n, err := strconv.Atoi(seg)
+		if err != nil {
+			return false
+		}
+		if n != want[i] {
+			return n > want[i]
+		}
+	}
+	return true
 }
 
 // dressSystem317 按官方 3.17.2 形态重建 system / messages / metadata。
@@ -99,7 +179,7 @@ func dressSystem317(payload map[string]any, acc *Account, sessionID string) {
 	}
 	payload["system"] = []any{
 		cached(p.CliPrefix),
-		cached(strings.Join(p.StableSections, "\n\n")),
+		cached(strings.Join(stableSections317(p, appVersion), "\n\n")),
 		cached("\n\n" + strings.Join(dynamic, "\n\n")),
 	}
 

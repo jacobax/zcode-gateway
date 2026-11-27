@@ -29,7 +29,12 @@ type upstreamVerdict struct {
 	// 与账号无关，记 strike 只会把一次 WAF 抖动摊成整池冷却；换出口或换号
 	// 可以继续，但不动账号状态。
 	InfraBlock bool
-	Reason     string
+	// Suspended 表示账号被上游判定封停（"account has been suspended for
+	// misusing the Start Plan" / "blocked due to unusual activity"）。
+	// 与 Risk 的区别是语义：Risk 是抖动、冷却后还能试；Suspended 是账号级
+	// 标记，只有人工申诉能解，继续重试反而会加深标记。
+	Suspended bool
+	Reason    string
 }
 
 const (
@@ -39,7 +44,11 @@ const (
 	// 封顶从 24h 下调到 4h（2026-11-22）：3012 多为出口环境/并发形态问题而非
 	// 单号滥用，误伤时 24h 等于把号废一天；4h 足够让真滥用者冷却，也让误伤
 	// 当天可恢复。指数退避本身不变（15m→30m→1h→2h→4h）。
-	riskCooldownMax     = 4 * time.Hour
+	riskCooldownMax = 4 * time.Hour
+	// suspendedCooldown 用于「账号封停」文案：6 小时。比 risk 封顶更长，
+	// 因为真封停需要人工申诉；但也不是永久——2026-11-27 实证该文案会被
+	// 形态问题触发（改回 3.17.2 后 4/4 账号全部 200），永久停用会误杀。
+	suspendedCooldown   = 6 * time.Hour
 	defaultRetryAfter   = 5 * time.Second
 	maxRetryAfter       = 120 * time.Second
 	modelBusyRetryAfter = time.Second
@@ -189,6 +198,14 @@ func classifyUpstream(status int, headers headerGetter, body []byte) upstreamVer
 		return verdict
 	}
 
+	// 账号封停（suspended / unusual-activity 标记）必须排在业务码之前：它以
+	// 405 + code 3012 承载，和「风控抖动」同码同状态，但语义是永久态——
+	// 只有人工申诉能解。按 Risk 处理会 15 分钟冷却后继续重试，而外部实践
+	// （magpie plugins#1559）证实：对已标记账号持续重试会把软拦截推成真封停。
+	if verdict, ok := suspendedVerdict(env.Msg, text); ok {
+		return verdict
+	}
+
 	if env.Code != 0 && env.Code != 200 {
 		if verdict, ok := businessCodeVerdict(env.Code, reason); ok {
 			// 瞬时限流码在 429 上以 Retry-After 为准——服务端给了具体秒数，
@@ -306,6 +323,30 @@ func captchaChallengeVerdict(status int, headers headerGetter, env upstreamEnvel
 	for _, needle := range []string{"captcha", "f001", "verify token", "verify failed"} {
 		if strings.Contains(text, needle) {
 			return upstreamVerdict{Retry: true, Reason: firstNonEmpty(env.Msg, "验证码挑战")}, true
+		}
+	}
+	return upstreamVerdict{}, false
+}
+
+// suspendedVerdict 识别「账号被封停」文案。
+//
+// 上游两种文案并存（zai-org/feedback #1610 / #716）：
+//   - "Your account has been suspended for misusing the Start Plan, such as
+//     proxying it to non-ZCode clients."  ← 2026-11-21 起大量出现
+//   - "request has been blocked due to unusual activity."  ← 更早的措辞
+//
+// 两者都是账号级标记：官方客户端同样被拒、换出口无效、额度照常可见。
+// 只认文案不认 HTTP 状态：同一条可能以 405 或 429 承载。
+func suspendedVerdict(reason string, text string) (upstreamVerdict, bool) {
+	for _, needle := range []string{
+		"has been suspended",
+		"misusing the start plan",
+		"blocked due to unusual activity",
+		"unusual-activity",
+	} {
+		if strings.Contains(text, needle) {
+			return upstreamVerdict{Retry: true, Suspended: true,
+				Reason: firstNonEmpty(reason, "上游封停（suspended）")}, true
 		}
 	}
 	return upstreamVerdict{}, false
