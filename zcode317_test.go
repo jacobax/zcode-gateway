@@ -7,6 +7,53 @@ import (
 	"time"
 )
 
+// 400 形态：在 317 基础上追加 Finishing work / Memory 两段（4.0.0 组装必带）。
+func TestDressSystem400AppendsNewSections(t *testing.T) {
+	t.Setenv("ZCODE_SYSTEM_SHAPE", "400")
+	prevVer := appVersion
+	appVersion = "4.0.0"
+	defer func() { appVersion = prevVer }()
+	body := map[string]any{
+		"model":    "GLM-5.3-Flash",
+		"system":   []any{},
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+	}
+	dressSystem317(body, &Account{}, "sess")
+	blocks, _ := body["system"].([]any)
+	if len(blocks) != 3 {
+		t.Fatalf("system 应为 3 块，得到 %d", len(blocks))
+	}
+	first, _ := blocks[0].(map[string]any)["text"].(string)
+	second, _ := blocks[1].(map[string]any)["text"].(string)
+	third, _ := blocks[2].(map[string]any)["text"].(string)
+	_ = first
+	if !strings.Contains(third, "# Finishing work") {
+		t.Fatal("400 形态应包含 Finishing work 段")
+	}
+	if !strings.Contains(third, "# Memory, notes and feedback") {
+		t.Fatal("400 形态应包含 Memory 段")
+	}
+	// Desktop Context 在第二块（stable sections）里。
+	if !strings.Contains(second, "This Desktop host supports Gen UI") {
+		t.Fatal("400 形态的 Desktop Context 应为 Gen UI 支持版")
+	}
+
+	// 317 形态不应追加这两段（回归保护）。
+	t.Setenv("ZCODE_SYSTEM_SHAPE", "317")
+	appVersion = "3.17.2"
+	body2 := map[string]any{
+		"model":    "GLM-5.3-Flash",
+		"system":   []any{},
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+	}
+	dressSystem317(body2, &Account{}, "sess")
+	b2, _ := body2["system"].([]any)
+	third2, _ := b2[2].(map[string]any)["text"].(string)
+	if strings.Contains(third2, "# Finishing work") {
+		t.Fatal("317 形态不应追加 Finishing work")
+	}
+}
+
 // 正文锁：Desktop Context 必须跟着版本头走。
 // 3.17.2 那条 "inline Gen UI is unavailable" 配 3.19.1 的头就是上游判
 // 3012 suspended 的形态（2026-11-27 生产 6 个号封停的直接原因）。

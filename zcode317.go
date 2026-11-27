@@ -43,6 +43,11 @@ type zcode317PromptSet struct {
 	DynamicBehavior         string   `json:"dynamicBehavior"`
 	SessionGuidance         string   `json:"sessionGuidance"`
 	ContextManagement       string   `json:"contextManagement"`
+	// FinishingWork / MemoryNotes 是 3.18.2 起新增、4.0.0 组装必带的两段
+	// （官方顺序：Context Management → Finishing Work → Memory Notes）。
+	// 只在 ZCODE_SYSTEM_SHAPE=400 时追加。
+	FinishingWork string `json:"finishingWork"`
+	MemoryNotes   string `json:"memoryNotes"`
 	PoweredBy               string   `json:"poweredBy"`
 	Environment             struct {
 		Heading        string `json:"heading"`
@@ -68,7 +73,11 @@ func init() {
 	// 317 形态自带版本号：没显式指定 ZCODE_APP_VERSION 时一起切到 3.17.2，
 	// 否则版本头和提示词会错配（实测两个方向都吃 3012）。
 	if systemShape317() && os.Getenv("ZCODE_APP_VERSION") == "" {
-		appVersion = "3.17.2"
+		if systemShape400() {
+			appVersion = "4.0.0"
+		} else {
+			appVersion = "3.17.2"
+		}
 	}
 	// 正文锁只对「有对应正文」的版本成立（我们手上有 3.17.2 与 3.19.1）。
 	// 显式抬到更高的版本（例如官方已到 4.0.0）时提醒：正文可能又变了，
@@ -81,15 +90,22 @@ func init() {
 	// 改回 3.17.2 立刻 200，交替四轮 100% 复现（aws3 真实账号）。也就是说
 	// 3.19.1 头会落到另一个权益桶，账号看起来「没额度」，随后被上游判
 	// suspended——除非你重新做过全套取证，否则不要改这个版本号。
-	if systemShape317() && strings.TrimSpace(appVersion) != "3.17.2" {
+	if systemShape317() && strings.TrimSpace(appVersion) != "3.17.2" && !versionAtLeast(appVersion, 4, 0, 0) {
 		log.Printf("警告：317 形态的取证版本是 3.17.2，当前 ZCODE_APP_VERSION=%q——"+
 			"2026-11-27 实测非 3.17.2 版本会稳定返回 1005 并可能触发 suspended", appVersion)
 	}
 }
 
-// systemShape317 是 3.17.2 形态的总开关。
+// systemShape317 是「官方形态」总开关：317（3.17.2 取证版）或 400（4.0.0）。
+// 两者共用同一套组装逻辑，差异只在 Desktop Context 选段与 4.0 追加的两段。
 func systemShape317() bool {
-	return strings.TrimSpace(os.Getenv("ZCODE_SYSTEM_SHAPE")) == "317"
+	shape := strings.TrimSpace(os.Getenv("ZCODE_SYSTEM_SHAPE"))
+	return shape == "317" || shape == "400"
+}
+
+// systemShape400 表示按 4.0.0 形态组装（多两段：Finishing work / Memory）。
+func systemShape400() bool {
+	return strings.TrimSpace(os.Getenv("ZCODE_SYSTEM_SHAPE")) == "400"
 }
 
 // interactiveViews3172 是 3.17.2 形态里 Desktop Context 的第一条 bullet。
@@ -168,6 +184,14 @@ func dressSystem317(payload map[string]any, acc *Account, sessionID string) {
 		dynamic = append(dynamic, strings.ReplaceAll(line, "{model}", model))
 	}
 	dynamic = append(dynamic, p.ContextManagement)
+	if systemShape400() {
+		if p.FinishingWork != "" {
+			dynamic = append(dynamic, p.FinishingWork)
+		}
+		if p.MemoryNotes != "" {
+			dynamic = append(dynamic, p.MemoryNotes)
+		}
+	}
 	dynamic = append(dynamic, clientSystemTexts(payload["system"])...)
 
 	cached := func(text string) map[string]any {
