@@ -2,6 +2,35 @@ package main
 
 import "testing"
 
+// 2026-11-27：上游在客户端版本不匹配时回「200 + {"code":0,"msg":"",...}」空包，
+// 必须判成失败（客户端否则看到空回复 / stream ended without a stop reason）。
+func TestEmptyEnvelopeIsFailure(t *testing.T) {
+	cases := []struct {
+		name   string
+		body   string
+		expect bool // 是否应判成失败
+	}{
+		{"上游空包（实测形状）", `{"code":0,"msg":"","logid":"20261127164646f6cc25fb585f2653d97c"}`, true},
+		{"空包无 msg", `{"code":0,"logid":"x"}`, true},
+		{"带 content 的正常响应", `{"content":[{"type":"text","text":"hi"}],"usage":{}}`, false},
+		{"带 choices 的正常响应", `{"choices":[{"message":{"content":"hi"}}]}`, false},
+		{"billing 的 data 响应", `{"code":0,"data":{"hasActiveStartPlan":true}}`, false},
+		{"业务错误 1005", `{"code":1005,"msg":"exceed quota limit"}`, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, ok := businessErrorVerdict([]byte(c.body))
+			if ok != c.expect {
+				t.Fatalf("businessErrorVerdict(%s) = %v, want %v", c.body, ok, c.expect)
+			}
+		})
+	}
+	// 空包最终必须映射成 502（不是 200），让失败可见。
+	if got := businessErrorStatus([]byte(`{"code":0,"msg":"","logid":"x"}`)); got != 502 {
+		t.Fatalf("空包应映射 502，得到 %d", got)
+	}
+}
+
 // 上游用 HTTP 200 承载业务失败，必须识别出来——否则会把错误 JSON 渲染给客户端、
 // 记成功日志，还会 ResetRiskStrikes 洗掉 3012 的 strike 计数。
 func TestBusinessErrorVerdict(t *testing.T) {

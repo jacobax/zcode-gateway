@@ -73,6 +73,15 @@ func businessErrorVerdict(body []byte) (upstreamVerdict, bool) {
 		return upstreamVerdict{}, false
 	}
 	env := parseUpstreamEnvelope(body)
+	// 2026-11-27 上游新增一种「空包」：客户端版本不匹配时回
+	// 200 + {"code":0,"msg":"","logid":"..."}，没有任何业务形状、也没有报错。
+	// 当成成功会把空响应当正文交给客户端——流式表现就是
+	// 「Anthropic stream ended without a stop reason」（magpie plugins#1639）。
+	// 这里判成上游异常：换号重试，全池耗尽时由 businessErrorStatus 回 502，
+	// 让失败可见，而不是假装成功。
+	if emptyEnvelope(probe) {
+		return upstreamVerdict{Retry: true, Reason: "上游空包（本次未服务）"}, true
+	}
 	if env.Code == 0 || env.Code == 200 {
 		return upstreamVerdict{}, false
 	}
@@ -81,6 +90,41 @@ func businessErrorVerdict(body []byte) (upstreamVerdict, bool) {
 		return upstreamVerdict{}, false
 	}
 	return verdict, true
+}
+
+// emptyEnvelope 判断 200 响应是不是「什么也没服务」的空包。
+//
+// 形状（实测 2026-11-27）：{"code":0,"msg":"","logid":"20261127164646..."}，
+// 通常 60~70 字节，没有 content / choices / data / type 等任何业务字段。
+// 只认「键集合都是 code/msg/logid/request_id/error 且 code 为 0」，避免把将来
+// 新增的正常字段误判成空包。
+func emptyEnvelope(probe map[string]any) bool {
+	if len(probe) == 0 {
+		return false
+	}
+	allowed := map[string]bool{"code": true, "msg": true, "message": true, "logid": true, "request_id": true, "error": true}
+	for key := range probe {
+		if !allowed[key] {
+			return false
+		}
+	}
+	// msg/message 必须为空——`{"code":0,"msg":"ok"}` 是正常业务回执，不能误判。
+	for _, key := range []string{"msg", "message"} {
+		if v, ok := probe[key]; ok {
+			if s, _ := v.(string); strings.TrimSpace(s) != "" {
+				return false
+			}
+		}
+	}
+	if code, ok := probe["code"]; ok {
+		switch v := code.(type) {
+		case float64:
+			return v == 0
+		case string:
+			return v == "0" || v == ""
+		}
+	}
+	return false
 }
 
 // businessErrorStatus 把「200 + 业务错误码」翻成该给的 HTTP 状态。
